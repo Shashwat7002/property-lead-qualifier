@@ -1,10 +1,11 @@
-import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import { AlertTriangle, ShieldX, Star, Trophy } from "lucide-react";
 import { QualificationStatus } from "../types";
 
 const statusLabels: Record<QualificationStatus, string> = {
-  qualified: "Qualified",
-  review: "Needs review",
-  rejected: "Rejected",
+  "priority-a": "Priority A",
+  "priority-b": "Priority B",
+  nurture: "Nurture C",
+  discard: "Discard",
 };
 
 interface StatusBadgeProps {
@@ -12,7 +13,8 @@ interface StatusBadgeProps {
 }
 
 export function StatusBadge({ status }: StatusBadgeProps): JSX.Element {
-  const Icon = status === "qualified" ? CheckCircle2 : status === "review" ? AlertTriangle : XCircle;
+  const Icon =
+    status === "priority-a" ? Trophy : status === "priority-b" ? Star : status === "nurture" ? AlertTriangle : ShieldX;
 
   return (
     <span className={`status-badge status-${status}`}>

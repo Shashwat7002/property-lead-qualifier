@@ -3,7 +3,7 @@ import { LucideIcon } from "lucide-react";
 interface MetricCardProps {
   label: string;
   value: string | number;
-  tone: "green" | "amber" | "red" | "blue";
+  tone: "green" | "amber" | "red" | "blue" | "teal";
   icon: LucideIcon;
 }
 

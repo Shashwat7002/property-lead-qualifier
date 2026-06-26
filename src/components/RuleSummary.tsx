@@ -1,49 +1,49 @@
 import {
   Banknote,
-  CalendarClock,
+  Building2,
   CheckCircle2,
   Home,
   Landmark,
   MapPinned,
-  Mail,
+  School,
   UserRoundCheck,
 } from "lucide-react";
 
 const rules = [
   {
     icon: MapPinned,
-    title: "Area",
-    text: "Forsyth County or North Fulton cities",
+    title: "Geography",
+    text: "North Fulton and South Forsyth stay heavily prioritized",
   },
   {
     icon: Home,
-    title: "Property",
-    text: "Residential, multifamily, commercial, land, industrial, or agricultural",
-  },
-  {
-    icon: CalendarClock,
-    title: "Age",
-    text: "Built before 1995",
-  },
-  {
-    icon: Banknote,
-    title: "Value",
-    text: "$200,000 to $1,000,000",
+    title: "Residential fit",
+    text: "Homes score up; obvious commercial, industrial, and farm parcels score down",
   },
   {
     icon: Landmark,
-    title: "Ownership",
-    text: "Out-of-state owner and 10+ years owned",
+    title: "Tenure and equity",
+    text: "Long ownership, low LTV, and free-and-clear signals move leads higher",
   },
   {
     icon: UserRoundCheck,
-    title: "Owner type",
-    text: "Natural person or estate, not LLC or corporation",
+    title: "Occupancy",
+    text: "Out-of-state, in-state absentee, and long-tenure owner-occupied leads can qualify",
   },
   {
-    icon: Mail,
-    title: "Delivery",
-    text: "Mailing address is required for export",
+    icon: Building2,
+    title: "Entity owners",
+    text: "Small landlords stay in play; mega institutional owners are penalized",
+  },
+  {
+    icon: Banknote,
+    title: "Value bands",
+    text: "Luxury homes get soft penalties instead of automatic rejection",
+  },
+  {
+    icon: School,
+    title: "Local demand",
+    text: "School premium, renovation upside, probate, and verified distress add weight",
   },
 ];
 
@@ -52,12 +52,12 @@ export function RuleSummary(): JSX.Element {
     <section className="panel rules-panel" aria-labelledby="rules-title">
       <div className="panel-heading">
         <div>
-          <span className="eyebrow">Fixed rules</span>
-          <h2 id="rules-title">Qualifying conditions</h2>
+          <span className="eyebrow">Weighted model</span>
+          <h2 id="rules-title">Lead scoring signals</h2>
         </div>
         <span className="status-chip">
           <CheckCircle2 aria-hidden="true" size={16} />
-          From DOCX
+          A/B/C tiers
         </span>
       </div>
 

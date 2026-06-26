@@ -1,11 +1,29 @@
 export type PropertyRecord = Record<string, string | number | null | undefined>;
 
-export type QualificationStatus = "qualified" | "review" | "rejected";
+export type LeadTier = "A" | "B" | "C" | "discard";
+
+export type QualificationStatus = "priority-a" | "priority-b" | "nurture" | "discard";
+
+export interface EnrichmentSummary {
+  geocoded: number;
+  schoolZones: number;
+  schoolPerformance: number;
+  census: number;
+  fred: boolean;
+  overpass: number;
+  warnings: string[];
+  updatedAt: string;
+}
 
 export interface QualificationResult {
   id: string;
   status: QualificationStatus;
+  tier: LeadTier;
   score: number;
+  motivationScore: number;
+  fitScore: number;
+  confidenceScore: number;
+  strategy: string;
   ownerName: string;
   propertyAddress: string;
   propertyCity: string;

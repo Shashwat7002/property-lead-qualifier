@@ -1,13 +1,22 @@
 import { useMemo, useState } from "react";
 import { Download, ShieldCheck, Sparkles } from "lucide-react";
+import { EnrichmentPanel } from "./components/EnrichmentPanel";
 import { ImportPanel } from "./components/ImportPanel";
 import { MetricsGrid } from "./components/MetricsGrid";
 import { ResultsTable } from "./components/ResultsTable";
 import { RuleSummary } from "./components/RuleSummary";
 import { downloadCsv, downloadTemplate, parseCsvFile, toExportRows } from "./lib/csv";
+import {
+  clearEnrichmentCache,
+  enrichRecords,
+  EnrichmentConfig,
+  EnrichmentProgress,
+  loadEnrichmentConfig,
+  saveEnrichmentConfig,
+} from "./lib/enrichment";
 import { qualifyRecords } from "./lib/qualification";
 import { sampleRecords } from "./lib/sampleData";
-import { PropertyRecord, QualificationStatus } from "./types";
+import { EnrichmentSummary, PropertyRecord, QualificationStatus } from "./types";
 
 type ResultFilter = "all" | QualificationStatus;
 
@@ -17,9 +26,13 @@ export function App(): JSX.Element {
   const [filter, setFilter] = useState<ResultFilter>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [error, setError] = useState("");
+  const [enrichmentConfig, setEnrichmentConfig] = useState<EnrichmentConfig>(() => loadEnrichmentConfig());
+  const [enrichmentSummary, setEnrichmentSummary] = useState<EnrichmentSummary | null>(null);
+  const [enrichmentProgress, setEnrichmentProgress] = useState<EnrichmentProgress | null>(null);
+  const [isEnriching, setIsEnriching] = useState(false);
 
   const results = useMemo(() => qualifyRecords(records), [records]);
-  const qualifiedResults = useMemo(() => results.filter((result) => result.status === "qualified"), [results]);
+  const actionableResults = useMemo(() => results.filter((result) => result.status !== "discard"), [results]);
   const filteredResults = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
 
@@ -31,7 +44,15 @@ export function App(): JSX.Element {
         result.propertyCity,
         result.county,
         result.mailingState,
+        result.tier,
+        result.strategy,
+        String(result.raw.assigned_elementary_school ?? ""),
+        String(result.raw.assigned_middle_school ?? ""),
+        String(result.raw.assigned_high_school ?? ""),
         result.flags.join(" "),
+        result.passes.join(" "),
+        result.warnings.join(" "),
+        result.failures.join(" "),
       ]
         .join(" ")
         .toLowerCase();
@@ -43,11 +64,13 @@ export function App(): JSX.Element {
   const summary = useMemo(
     () => ({
       total: results.length,
-      qualified: qualifiedResults.length,
-      review: results.filter((result) => result.status === "review").length,
-      rejected: results.filter((result) => result.status === "rejected").length,
+      priorityA: results.filter((result) => result.status === "priority-a").length,
+      priorityB: results.filter((result) => result.status === "priority-b").length,
+      nurture: results.filter((result) => result.status === "nurture").length,
+      discard: results.filter((result) => result.status === "discard").length,
+      actionable: actionableResults.length,
     }),
-    [qualifiedResults.length, results],
+    [actionableResults.length, results],
   );
 
   const handleFileSelected = async (file: File) => {
@@ -72,8 +95,39 @@ export function App(): JSX.Element {
     setError("");
   };
 
-  const handleExportQualified = () => {
-    downloadCsv("qualified_property_leads.csv", toExportRows(qualifiedResults));
+  const handleConfigChange = (config: EnrichmentConfig) => {
+    setEnrichmentConfig(config);
+    saveEnrichmentConfig(config);
+  };
+
+  const handleEnrich = async () => {
+    setError("");
+    setIsEnriching(true);
+    setEnrichmentProgress(null);
+
+    try {
+      const enriched = await enrichRecords(records, enrichmentConfig, setEnrichmentProgress);
+      setRecords(enriched.records);
+      setEnrichmentSummary(enriched.summary);
+
+      if (enriched.summary.warnings.length > 0) {
+        setError(enriched.summary.warnings.slice(0, 2).join(" "));
+      }
+    } catch (enrichmentError) {
+      setError(enrichmentError instanceof Error ? enrichmentError.message : "Could not enrich the lead list.");
+    } finally {
+      setIsEnriching(false);
+    }
+  };
+
+  const handleClearEnrichmentCache = () => {
+    clearEnrichmentCache();
+    setEnrichmentSummary(null);
+    setEnrichmentProgress(null);
+  };
+
+  const handleExportActionable = () => {
+    downloadCsv("ranked_property_leads.csv", toExportRows(actionableResults));
   };
 
   return (
@@ -86,9 +140,9 @@ export function App(): JSX.Element {
           <p className="eyebrow">FMLS Bridge CSV ready</p>
           <h1>Property Lead Qualifier</h1>
         </div>
-        <button className="primary-button export-button" type="button" onClick={handleExportQualified}>
+        <button className="primary-button export-button" type="button" onClick={handleExportActionable}>
           <Download aria-hidden="true" size={18} />
-          Export qualified
+          Export A-C leads
         </button>
       </header>
 
@@ -98,14 +152,14 @@ export function App(): JSX.Element {
             <ShieldCheck aria-hidden="true" size={16} />
             No scraping required
           </span>
-          <h2>Review property-owner leads against her exact buying signals.</h2>
+          <h2>Rank property-owner leads by who looks most worth calling first.</h2>
           <p>
-            Load a CSV, keep only compliant matches, and send the qualified list to a clean export.
+            Load a CSV, score each home for North Fulton and South Forsyth, and export the A, B, and C leads.
           </p>
         </div>
         <div className="hero-stat">
-          <span>Qualified today</span>
-          <strong>{summary.qualified}</strong>
+          <span>A-C leads</span>
+          <strong>{summary.actionable}</strong>
         </div>
       </section>
 
@@ -113,9 +167,10 @@ export function App(): JSX.Element {
 
       <MetricsGrid
         total={summary.total}
-        qualified={summary.qualified}
-        review={summary.review}
-        rejected={summary.rejected}
+        priorityA={summary.priorityA}
+        priorityB={summary.priorityB}
+        nurture={summary.nurture}
+        discard={summary.discard}
       />
 
       <div className="workspace-grid">
@@ -128,6 +183,16 @@ export function App(): JSX.Element {
         />
         <RuleSummary />
       </div>
+
+      <EnrichmentPanel
+        config={enrichmentConfig}
+        isEnriching={isEnriching}
+        progress={enrichmentProgress}
+        summary={enrichmentSummary}
+        onConfigChange={handleConfigChange}
+        onEnrich={handleEnrich}
+        onClearCache={handleClearEnrichmentCache}
+      />
 
       <ResultsTable
         results={filteredResults}
