@@ -1,7 +1,8 @@
 """
 Sprint Lead Qualification Engine v2
 -------------------------------------
-Multi-dimensional weighted scoring — ported from property-lead-qualifier (TypeScript).
+Multi-dimensional weighted scoring for North Fulton / Forsyth County listing leads.
+Target: individual homebuyers (families, move-up, downsizers) — NOT investors/flippers.
 
 Score formula
   motivationScore  = clamp(30 + motivationRaw × 2.4,  0, 100)
@@ -9,7 +10,32 @@ Score formula
   confidenceScore  = clamp(72 + confidenceRaw × 4,     0, 100)
   blended          = motivationScore×0.6 + fitScore×0.25 + confidenceScore×0.15
 
-Tiers  A ≥70 → HOT  |  B ≥55 → WARM  |  C ≥40 → COOL  |  discard → PASS
+Tiers  HOT ≥70  |  WARM ≥55  |  COOL ≥40  |  PASS <40
+
+── SCORING ASSUMPTIONS (analysis-assumptions-log) ─────────────────────────────
+All weights below are expert-assumed, not empirically derived from conversion data.
+Recalibrate against actual listing-agreement outcomes once ≥100 conversions are logged.
+
+  Dimension weights   motivation 60 / fit 25 / confidence 15
+  Formula baselines   motivation base 30, fit base 45, confidence base 72
+  Key signal weights  probate +18, tax distress +18, free-and-clear +15,
+                      OOS absentee +14, empty-nest +8, vacancy +8,
+                      long tenure (15+ yr) +10, Mom-and-Pop +8, senior +6,
+                      upgrade seller +6, in-state absentee +6
+  Hard caps           outside geography → 39, commercial → 39, value <$200K → 39,
+                      institutional → 39, no motivation (raw ≤5, no positive flag) → 38,
+                      OOS without confirmed 10+ yr tenure → 54
+
+── DATA SOURCES ────────────────────────────────────────────────────────────────
+  FMLS        Active/off-market listings (property_type, bedrooms, year_built, ListPrice)
+  GSCCCA      Georgia deed index: years_owned, transfer_type, homestead_exemption
+              County IDs: Fulton=60, Forsyth=58 — free account at apps.gsccca.org
+  FRED        3 macro series: mortgage rate (30-yr fixed), unemployment (Atlanta MSA),
+              HPI growth (GA county level)
+  Census ACS  Tract-level: median income, median home value, owner-occupancy rate,
+              vacancy rate, age-65+ share
+  OSM/Overpass  Amenity access: grocery, parks, major roads
+  GOSA        School CCRPI by ZIP (≥92 = $150K–$200K buyer premium in North Fulton)
 """
 
 import re
@@ -70,15 +96,16 @@ class LeadEngine:
         # Flask demo stores full market values in 'assessed_value' (from FMLS ListPrice)
         market_value  = float(prop.get("assessed_value") or 0)
 
-        bedrooms      = int(prop.get("bedrooms") or 0)
-        year_built    = int(prop.get("year_built") or 0)
+        bedrooms      = max(0, min(int(prop.get("bedrooms") or 0), 10))   # clamp 0-10
+        _yb_raw       = int(prop.get("year_built") or 0)
+        year_built    = _yb_raw if 1900 <= _yb_raw <= CURRENT_YEAR else 0  # reject impossible values
 
         is_oos        = bool(prop.get("is_out_of_state_absentee"))
         is_instate    = bool(prop.get("is_in_state_absentee"))
         tax_delinquent = bool(prop.get("tax_delinquent"))
         foreclosure   = bool(prop.get("foreclosure"))
         free_and_clear = bool(prop.get("free_and_clear"))
-        equity_pct    = float(prop.get("estimated_equity_pct") or 0)
+        equity_pct    = max(0.0, min(float(prop.get("estimated_equity_pct") or 0), 100.0))
         equity_ratio  = (equity_pct / 100) if equity_pct else None
         total_props   = int(prop.get("total_properties_owned") or 1)
 
@@ -343,6 +370,16 @@ class LeadEngine:
         if tax_delinquent and vacancy and year_built and year_built < 1985:
             apply(-3, "Distressed vacant pre-1985 home — likely attracts investors over individual buyers", "fit", "warning")
 
+        # ── Original-owner cohort (cohort-analysis: build-year × tenure) ────────
+        # If current_year − years_owned ≈ year_built, owner likely purchased new.
+        # Original owners of 2000–2018 homes with 10+ yr tenure are the highest-density
+        # North Fulton listing conversion cohort: maximum equity, emotional history,
+        # and predictable life-stage transitions (empty-nest, upgrade, downsize).
+        if gsccca_connected and year_built and years_owned >= 10:
+            est_purchase_year = CURRENT_YEAR - years_owned
+            if abs(est_purchase_year - year_built) <= 2:
+                apply(3, "Likely original owner — bought new, peak equity and lifecycle alignment", "motivation", "pass")
+
         # ── FRED macro signals ────────────────────────────────────────────────
         fred_mortgage = prop.get("fred_mortgage_rate")
         fred_unemp    = prop.get("fred_unemployment_rate")
@@ -362,9 +399,13 @@ class LeadEngine:
                 apply(3, "Local job-market stress — may accelerate seller decisions", "motivation", "pass")
 
         if fred_hpi is not None:
-            if float(fred_hpi) >= 0.20:
+            hpi = float(fred_hpi)
+            if hpi >= 0.20:
                 apply(2, "Strong county HPI growth — equity build confirmed", "confidence", "pass")
-            elif float(fred_hpi) >= 0.10:
+                if is_oos or is_instate:
+                    # Absentee owners most likely to time market exit when values are high
+                    apply(2, "Strong HPI — equity-rich absentee may time market exit", "motivation", "pass")
+            elif hpi >= 0.10:
                 apply(1, "Positive county HPI — appreciating market", "confidence", "pass")
 
         # ── Census tract signals ──────────────────────────────────────────────
@@ -475,21 +516,30 @@ class LeadEngine:
             data_quality_notes.append("Out-of-state owner — phone/email enrichment needed before outreach")
 
         # ── Guards ────────────────────────────────────────────────────────────
-        has_positive = any(f in POSITIVE_MOTIVATION_FLAGS for f in flags)
+        # "Owned X+ years" flag text is dynamic — check by prefix so it counts as positive.
+        has_positive = (
+            any(f in POSITIVE_MOTIVATION_FLAGS for f in flags)
+            or any(f.startswith("Owned ") and f.endswith("+ years") for f in flags)
+        )
         if not has_positive and motivation_raw <= 5:
             score_cap = min(score_cap, 38)
             warnings.append("No seller motivation signals detected — capped below tier-C")
 
-        # OOS alone (without 10+ yr tenure or overriding distress) → cap at B-tier
-        has_oos_flag = "Out-of-state absentee" in flags
-        has_long_tenure = years_owned >= 10
+        # OOS alone (without 10+ yr tenure or overriding distress) → cap at B-tier.
+        # Only apply when GSCCCA is connected and tenure is confirmed short; if tenure
+        # is unknown (GSCCCA offline) we cannot penalize for unverified data.
+        has_oos_flag   = "Out-of-state absentee" in flags
+        has_long_tenure = gsccca_connected and years_owned >= 10
         has_overriding = any(f in flags for f in [
             "Probate, trust, or estate signal", "Verified tax or foreclosure distress",
             "Property-level vacancy indicator", "Ownership transfer anomaly",
         ])
-        if has_oos_flag and not has_long_tenure and not has_overriding:
-            score_cap = min(score_cap, 54)
-            warnings.append("OOS absentee without confirmed 10+ yr tenure — capped at B-tier")
+        if has_oos_flag and not has_overriding:
+            if gsccca_connected and not has_long_tenure:
+                score_cap = min(score_cap, 54)
+                warnings.append("OOS absentee — tenure confirmed short (< 10 yr via GSCCCA), capped at B-tier")
+            elif not gsccca_connected:
+                warnings.append("OOS absentee — GSCCCA offline, 10-yr tenure unverified")
 
         # ── Blend scores ──────────────────────────────────────────────────────
         motivation_score = max(0, min(100, round(30 + motivation_raw * 2.4)))
