@@ -14,8 +14,6 @@ const NORTH_FULTON_CITIES = [
 ];
 
 const NORTH_FULTON_CITY_SET = new Set(NORTH_FULTON_CITIES);
-const SOUTH_FORSYTH_ZIPS = new Set(["30040", "30041", "30024"]);
-const SOUTH_FORSYTH_FALLBACK_CITIES = new Set(["cumming", "alpharetta", "suwanee"]);
 
 const CORPORATE_OWNER_TERMS = [
   " llc",
@@ -304,26 +302,18 @@ function getTargetAreaMatch(
     };
   }
 
-  if (isForsyth && normalizedZip && SOUTH_FORSYTH_ZIPS.has(normalizedZip)) {
+  if (isForsyth) {
     return {
       isTarget: true,
       isPrecise: true,
-      label: "South Forsyth target ZIP",
-    };
-  }
-
-  if (isForsyth && !normalizedZip && SOUTH_FORSYTH_FALLBACK_CITIES.has(normalizedCity)) {
-    return {
-      isTarget: true,
-      isPrecise: false,
-      label: "Possible South Forsyth target city; ZIP verification recommended",
+      label: "Forsyth County target area",
     };
   }
 
   return {
     isTarget: false,
     isPrecise: false,
-    label: "Outside North Fulton or South Forsyth",
+    label: "Outside North Fulton or Forsyth County",
   };
 }
 
@@ -377,29 +367,6 @@ function isLikelySingleFamily(propertyType: string): boolean {
   return residential && !excluded;
 }
 
-function getLocalValueCeiling(county: string, city: string, zip: string): number {
-  const normalizedCounty = county.toLowerCase();
-  const normalizedCity = city.toLowerCase().trim();
-  const normalizedZip = normalizeZip(zip);
-
-  if (normalizedCity === "milton") {
-    return 3000000;
-  }
-
-  if (normalizedCity === "alpharetta" || normalizedCity === "johns creek" || normalizedZip === "30005") {
-    return 2200000;
-  }
-
-  if (normalizedCounty.includes("forsyth") || normalizedZip === "30040" || normalizedZip === "30041" || normalizedZip === "30024") {
-    return 1800000;
-  }
-
-  if (normalizedCity === "roswell") {
-    return 1600000;
-  }
-
-  return 1500000;
-}
 
 function classifyPropertyType(propertyType: string): PropertyTypeFit {
   const normalized = propertyType.toLowerCase();
@@ -526,7 +493,7 @@ function getStatus(tier: LeadTier): QualificationStatus {
 
 function chooseStrategy(flags: string[], failures: string[], tier: LeadTier): string {
   if (tier === "discard") {
-    return failures.includes("Outside North Fulton or South Forsyth")
+    return failures.includes("Outside North Fulton or Forsyth County")
       ? "Discard - outside target area"
       : "Discard - poor fit";
   }
@@ -539,7 +506,7 @@ function chooseStrategy(flags: string[], failures: string[], tier: LeadTier): st
     return "Motivated seller — timeline pressure";
   }
 
-  if (flags.includes("Small landlord") || flags.includes("Mid-size landlord")) {
+  if (flags.includes("Mom-and-Pop landlord")) {
     return "Portfolio exit — listing conversion";
   }
 
@@ -748,16 +715,14 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   }
 
   if (marketValue !== null) {
-    const localValueCeiling = getLocalValueCeiling(county, propertyCity, propertyZip);
-
     if (marketValue < 200000) {
-      apply(-8, "Value under $200,000", "fit", "failure");
-    } else if (marketValue <= localValueCeiling) {
-      apply(4, "Submarket value band fit", "fit", "pass");
-    } else if (ownershipYears !== null && ownershipYears >= 10 && equityRatio !== null && equityRatio >= 0.4) {
-      apply(3, "Luxury high-equity owner — high-GCI listing candidate", "motivation", "pass");
+      apply(-8, "Value under $200,000 minimum threshold", "fit", "failure");
+      scoreCap = Math.min(scoreCap, 39);
+    } else if (marketValue > 1000000) {
+      apply(-8, "Value above $1,000,000 maximum threshold", "fit", "failure");
+      scoreCap = Math.min(scoreCap, 39);
     } else {
-      apply(0, "High-value asset above submarket ceiling — verify listing motivation", "fit", "warning");
+      apply(4, "Within $200K–$1M target value band", "fit", "pass");
     }
 
     if (fairMarketValue === null && assessedValue !== null) {
@@ -770,25 +735,20 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   if (ownerName) {
     if (isProbateOrInherited(ownerName, transferSignal)) {
       apply(18, "Probate, trust, or estate signal", "motivation", "flag");
-    } else if (!ownerIsCorporate) {
-      apply(3, "Natural person owner", "motivation", "pass");
     }
 
     if (ownerIsCorporate) {
+      apply(-15, "Corporate entity owner — excluded per ownership filter", "fit", "failure");
+      scoreCap = Math.min(scoreCap, 39);
+    } else {
+      apply(3, "Natural person owner", "motivation", "pass");
+      // Mom-and-Pop: per spec, individual (non-LLC) owners with 2–5 properties
       if (ownerPropertyCount !== null) {
-        if (ownerPropertyCount >= 100) {
-          apply(-10, "Mega institutional owner", "fit", "failure");
-        } else if (ownerPropertyCount > 25) {
-          apply(-4, "Large portfolio owner", "fit", "failure");
-        } else if (ownerPropertyCount >= 11) {
-          apply(5, "Mid-size landlord", "motivation", "flag");
-        } else if (ownerPropertyCount >= 2) {
-          apply(8, "Small landlord", "motivation", "flag");
-        } else {
-          apply(1, "Entity owner with small portfolio", "motivation", "pass");
+        if (ownerPropertyCount >= 2 && ownerPropertyCount <= 5) {
+          apply(8, "Mom-and-Pop landlord", "motivation", "flag");
+        } else if (ownerPropertyCount > 5) {
+          apply(3, "Multi-property individual owner", "motivation", "pass");
         }
-      } else {
-        apply(-3, "Entity owner without portfolio size", "confidence", "warning");
       }
     }
   } else {
@@ -882,14 +842,13 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   }
 
   if (yearBuilt !== null) {
-    if (yearBuilt < 1985) {
-      apply(4, "Older home with renovation upside", "fit", "pass", true);
-    } else if (yearBuilt < 2000) {
-      apply(3, "Likely cosmetic renovation need", "fit", "pass", true);
-    } else if (yearBuilt < 2010) {
-      apply(1, "Post-1995 home kept in scoring model", "fit", "pass", true);
+    if (yearBuilt >= 1995) {
+      apply(-8, "Built 1995 or later — outside year-built criterion", "fit", "failure");
+      scoreCap = Math.min(scoreCap, 39);
+    } else if (yearBuilt < 1985) {
+      apply(4, "Pre-1985 home with renovation upside", "fit", "pass", true);
     } else {
-      apply(0, "Newer home; no age penalty", "fit", "pass");
+      apply(3, "Pre-1995 home", "fit", "pass", true);
     }
   } else {
     addMissing("Missing year built");
@@ -1044,7 +1003,7 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     "Verified tax or foreclosure distress", "Property-level vacancy indicator",
     "Empty-nest probability", "Senior exemption lifecycle signal",
     "No homestead on likely SFR", "Free and clear", "High-equity owner",
-    "Owner-occupied with long tenure", "Small landlord", "Mid-size landlord",
+    "Owner-occupied with long tenure", "Mom-and-Pop landlord",
     "Ownership transfer anomaly", "Premium school performance — North Fulton resale driver",
   ];
   const hasPositiveMotivationFlag = flags.some((f) => POSITIVE_MOTIVATION_FLAGS.includes(f));
