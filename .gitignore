@@ -1,7 +1,8 @@
 .DS_Store
-node_modules/
-dist/
+__pycache__/
+*.py[cod]
 .env
-.env.local
-*.tsbuildinfo
-npm-debug.log*
+venv/
+.venv/
+exports/
+*.csv
