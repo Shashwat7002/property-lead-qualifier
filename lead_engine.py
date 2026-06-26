@@ -283,18 +283,22 @@ class LeadEngine:
         if tax_delinquent or foreclosure:
             apply(18, "Verified tax or foreclosure distress", "motivation", "flag")
 
-        # ── Year built ────────────────────────────────────────────────────────
+        # ── Year built — listing marketability, not seller motivation ────────────
+        # Motivation (tenure, equity, absentee, estate, rate-lock) already answers
+        # "will they sell?" Build year answers "how easy will it be to sell once listed?"
+        # 2005–2020 sweet spot: 5–20 yr tenure, large appreciation, family transitions,
+        # modern finishes that buyers expect in North Fulton / South Forsyth.
         if year_built:
-            if year_built < 1985:
-                apply(4, "Pre-1985 home with renovation upside", "fit", "pass", True)
-            elif year_built < 1995:
-                apply(3, "Pre-1995 home", "fit", "pass", True)
-            elif year_built < 2010:
-                # 1995–2009 homes are entering the 18-30-yr renovation cycle in North Fulton —
-                # roofs, HVAC, windows, kitchens; owners are primed to sell rather than renovate
-                apply(5, "1995–2009 home — entering renovation cycle", "fit", "pass", True)
+            if year_built >= 2021:
+                apply(4, "2021+ home — modern inventory, strong buyer demand", "fit", "pass", True)
+            elif year_built >= 2005:
+                apply(6, "2005–2020 home — prime lifecycle: equity, demand, and transitions aligned", "fit", "pass", True)
+            elif year_built >= 1995:
+                apply(4, "1995–2004 home — solid suburban stock, entering renovation consideration", "fit", "pass", True)
+            elif year_built >= 1985:
+                apply(1, "1985–1994 home — older layouts may affect buyer appeal", "fit", "pass", True)
             else:
-                apply(-2, "Newer home (2010+) — lower renovation upside", "fit", "warning")
+                apply(-1, "Pre-1985 home — dated systems and layouts reduce buyer demand", "fit", "warning", True)
 
         # ── Lifecycle signals (empty-nest, school-stage) ─────────────────────
         if bedrooms >= 3 and years_owned >= 20:
