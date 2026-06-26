@@ -241,6 +241,14 @@ export async function enrichRecords(
     updatedAt: new Date().toISOString(),
   };
 
+  if (config.enableFred && !config.fredApiKey) {
+    warnings.push("FRED key missing; market context skipped.");
+  }
+
+  if (config.enableCensus && !config.censusApiKey) {
+    warnings.push("Census key missing; tract demographics skipped.");
+  }
+
   onProgress?.({ completed: 0, total: records.length, message: "Preparing data sources" });
 
   const [fredContext, performanceCache] = await Promise.all([
@@ -718,9 +726,25 @@ async function fetchFredSeries(seriesId: string, apiKey: string): Promise<FredSe
   return {
     latest: values[0]?.value ?? null,
     previous: values[1]?.value ?? null,
-    fiveAgo: values.find((_, index) => index >= Math.min(values.length - 1, 20))?.value ?? null,
+    fiveAgo: getObservationYearsAgo(values, 5),
     date: values[0]?.date ?? "",
   };
+}
+
+function getObservationYearsAgo(values: Array<{ date: string; value: number }>, yearsBack: number): number | null {
+  if (!values.length) {
+    return null;
+  }
+
+  const latestDate = new Date(values[0].date);
+  const cutoffDate = new Date(latestDate);
+  cutoffDate.setFullYear(cutoffDate.getFullYear() - yearsBack);
+
+  return (
+    values.find((observation) => new Date(observation.date) <= cutoffDate)?.value ??
+    values[values.length - 1]?.value ??
+    null
+  );
 }
 
 function applyFredContext(record: PropertyRecord, fred: FredContext): void {

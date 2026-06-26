@@ -20,6 +20,8 @@ export interface QualificationResult {
   status: QualificationStatus;
   tier: LeadTier;
   score: number;
+  sellerLikelihoodScore: number;
+  contactabilityScore: number;
   motivationScore: number;
   fitScore: number;
   confidenceScore: number;

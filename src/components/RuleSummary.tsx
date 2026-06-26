@@ -13,7 +13,7 @@ const rules = [
   {
     icon: MapPinned,
     title: "Geography",
-    text: "North Fulton and South Forsyth stay heavily prioritized",
+    text: "North Fulton cities and South Forsyth ZIPs are prioritized more strictly",
   },
   {
     icon: Home,
@@ -23,12 +23,12 @@ const rules = [
   {
     icon: Landmark,
     title: "Tenure and equity",
-    text: "Long ownership, low LTV, and free-and-clear signals move leads higher",
+    text: "Long ownership, high equity, and free-and-clear signals drive the seller rank",
   },
   {
     icon: UserRoundCheck,
     title: "Occupancy",
-    text: "Out-of-state, in-state absentee, and long-tenure owner-occupied leads can qualify",
+    text: "Absentee, homestead, senior exemption, and vacancy signals shape motivation",
   },
   {
     icon: Building2,
@@ -38,12 +38,12 @@ const rules = [
   {
     icon: Banknote,
     title: "Value bands",
-    text: "Luxury homes get soft penalties instead of automatic rejection",
+    text: "Assessed values are normalized and luxury homes are judged by submarket fit",
   },
   {
     icon: School,
     title: "Local demand",
-    text: "School premium, renovation upside, probate, and verified distress add weight",
+    text: "Schools, tract strength, and amenities support fit without overpowering motivation",
   },
 ];
 

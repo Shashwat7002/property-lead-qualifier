@@ -3,17 +3,18 @@ import { LeadTier, PropertyRecord, QualificationResult, QualificationStatus } fr
 const CURRENT_YEAR = new Date().getFullYear();
 const DEFAULT_PROPERTY_STATE = "GA";
 const MISSING_DATA_PENALTY_LIMIT = -12;
+const EXECUTION_FIT_BONUS_LIMIT = 10;
 
 const NORTH_FULTON_CITIES = [
   "alpharetta",
   "johns creek",
   "milton",
-  "mountain park",
   "roswell",
-  "sandy springs",
 ];
 
-const SOUTH_FORSYTH_CITIES = ["cumming"];
+const NORTH_FULTON_CITY_SET = new Set(NORTH_FULTON_CITIES);
+const SOUTH_FORSYTH_ZIPS = new Set(["30040", "30041", "30005", "30024"]);
+const SOUTH_FORSYTH_FALLBACK_CITIES = new Set(["cumming", "alpharetta", "suwanee"]);
 
 const CORPORATE_OWNER_TERMS = [
   " llc",
@@ -117,10 +118,12 @@ const FIELD_ALIASES = {
   propertyAddress: ["property_address", "situs_address", "site_address", "address", "street_address"],
   propertyCity: ["property_city", "situs_city", "site_city", "city", "municipality"],
   propertyState: ["property_state", "situs_state", "site_state"],
+  propertyZip: ["property_zip", "situs_zip", "site_zip", "zip", "zip_code", "postal_code", "property_postal_code"],
   county: ["county", "jurisdiction", "property_county"],
   propertyType: ["property_type", "land_use", "use_code_description", "asset_type", "property_class"],
   yearBuilt: ["year_built", "built", "yr_built"],
-  marketValue: ["market_value", "assessed_value", "estimated_value", "total_value", "fair_market_value"],
+  fairMarketValue: ["fair_market_value", "market_value", "estimated_value", "total_value", "avm_value", "appraised_value"],
+  assessedValue: ["assessed_value", "tax_assessed_value", "assessed_total_value", "taxable_assessed_value"],
   lastSaleDate: ["last_sale_date", "sale_date", "last_recorded_sale", "recorded_sale_date"],
   lastSaleYear: ["last_sale_year", "sale_year"],
   mailingAddress: ["mailing_address", "owner_mailing_address", "mail_address", "taxpayer_address"],
@@ -139,6 +142,9 @@ const FIELD_ALIASES = {
   mortgageDate: ["mortgage_recording_date", "mortgage_date", "loan_origination_date", "mortgage_origination_date"],
   lastTransferType: ["last_transfer_type", "transfer_type", "deed_type", "deed_signal", "last_deed_type"],
   foreclosureStatus: ["foreclosure_status", "foreclosure", "lis_pendens_status", "default_status"],
+  homesteadExemption: ["homestead_exemption", "has_homestead", "homestead", "exemption_code"],
+  seniorExemption: ["senior_exemption", "age65_exemption", "senior_tax_exemption", "age_65_exemption"],
+  vacancyFlag: ["vacant_property", "usps_vacant", "vacancy_flag", "property_vacant", "is_vacant"],
   schoolRating: ["school_rating", "school_score", "assigned_school_rating"],
   schoolPremium: ["school_premium", "premium_school_district", "school_district_premium"],
   schoolPerformanceScore: ["school_performance_score", "school_performance_avg", "gosa_school_score"],
@@ -273,17 +279,51 @@ function addressesMatch(propertyAddress: string, mailingAddress: string): boolea
   );
 }
 
-function isTargetArea(county: string, city: string): boolean {
+function normalizeZip(value: string): string {
+  return value.match(/\d{5}/)?.[0] ?? "";
+}
+
+function getTargetAreaMatch(
+  county: string,
+  city: string,
+  zip: string,
+): { isTarget: boolean; isPrecise: boolean; label: string } {
   const normalizedCounty = county.toLowerCase();
   const normalizedCity = city.toLowerCase().trim();
+  const normalizedZip = normalizeZip(zip);
+  const isFulton = normalizedCounty.includes("fulton") || normalizedCounty.includes("north fulton");
+  const isForsyth = normalizedCounty.includes("forsyth");
+  const isNorthFultonCity = NORTH_FULTON_CITY_SET.has(normalizedCity);
 
-  return (
-    normalizedCounty.includes("forsyth") ||
-    normalizedCounty.includes("north fulton") ||
-    (normalizedCounty.includes("fulton") && NORTH_FULTON_CITIES.includes(normalizedCity)) ||
-    NORTH_FULTON_CITIES.includes(normalizedCity) ||
-    SOUTH_FORSYTH_CITIES.includes(normalizedCity)
-  );
+  if ((isFulton || !normalizedCounty) && isNorthFultonCity) {
+    return {
+      isTarget: true,
+      isPrecise: Boolean(isFulton),
+      label: "North Fulton target city",
+    };
+  }
+
+  if (isForsyth && normalizedZip && SOUTH_FORSYTH_ZIPS.has(normalizedZip)) {
+    return {
+      isTarget: true,
+      isPrecise: true,
+      label: "South Forsyth target ZIP",
+    };
+  }
+
+  if (isForsyth && !normalizedZip && SOUTH_FORSYTH_FALLBACK_CITIES.has(normalizedCity)) {
+    return {
+      isTarget: true,
+      isPrecise: false,
+      label: "Possible South Forsyth target city; ZIP verification recommended",
+    };
+  }
+
+  return {
+    isTarget: false,
+    isPrecise: false,
+    label: "Outside North Fulton or South Forsyth",
+  };
 }
 
 function isCorporateOwner(ownerName: string): boolean {
@@ -317,7 +357,47 @@ function hasNoActiveMortgage(activeMortgage: string): boolean {
 }
 
 function isTruthySignal(value: string): boolean {
-  return /^(yes|y|true|1|premium|high)$/i.test(value.trim());
+  return /^(yes|y|true|1|premium|high|active|present|homestead|exempt)$/i.test(value.trim());
+}
+
+function isFalseySignal(value: string): boolean {
+  return /^(no|n|false|0|none|absent|not exempt|non[-\s]?homestead)$/i.test(value.trim());
+}
+
+function hasKnownSignal(value: string): boolean {
+  return Boolean(value.trim());
+}
+
+function isLikelySingleFamily(propertyType: string): boolean {
+  const normalized = propertyType.toLowerCase();
+  const residential = /single|sfr|detached|residential/i.test(normalized);
+  const excluded = /townhouse|townhome|condo|duplex|triplex|quad|multi|apartment|land|lot/i.test(normalized);
+
+  return residential && !excluded;
+}
+
+function getLocalValueCeiling(county: string, city: string, zip: string): number {
+  const normalizedCounty = county.toLowerCase();
+  const normalizedCity = city.toLowerCase().trim();
+  const normalizedZip = normalizeZip(zip);
+
+  if (normalizedCity === "milton") {
+    return 3000000;
+  }
+
+  if (normalizedCity === "alpharetta" || normalizedCity === "johns creek" || normalizedZip === "30005") {
+    return 2200000;
+  }
+
+  if (normalizedCounty.includes("forsyth") || normalizedZip === "30040" || normalizedZip === "30041" || normalizedZip === "30024") {
+    return 1800000;
+  }
+
+  if (normalizedCity === "roswell") {
+    return 1600000;
+  }
+
+  return 1500000;
 }
 
 function classifyPropertyType(propertyType: string): PropertyTypeFit {
@@ -387,6 +467,28 @@ function classifyPropertyType(propertyType: string): PropertyTypeFit {
 
 function clampScore(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function calculateContactabilityScore(phone: string, email: string, mailingAddress: string, ownerName: string): number {
+  let score = 25;
+
+  if (phone) {
+    score += 35;
+  }
+
+  if (email) {
+    score += 25;
+  }
+
+  if (mailingAddress) {
+    score += 10;
+  }
+
+  if (ownerName) {
+    score += 5;
+  }
+
+  return clampScore(score);
 }
 
 function getTier(score: number): LeadTier {
@@ -469,10 +571,13 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   const propertyCity = findValue(record, FIELD_ALIASES.propertyCity);
   const propertyState =
     extractStateCode(findValue(record, FIELD_ALIASES.propertyState)) || DEFAULT_PROPERTY_STATE;
+  const propertyZip = normalizeZip(findValue(record, FIELD_ALIASES.propertyZip));
   const county = findValue(record, FIELD_ALIASES.county);
   const propertyType = findValue(record, FIELD_ALIASES.propertyType);
   const yearBuilt = parseNumber(findValue(record, FIELD_ALIASES.yearBuilt));
-  const marketValue = parseNumber(findValue(record, FIELD_ALIASES.marketValue));
+  const fairMarketValue = parseNumber(findValue(record, FIELD_ALIASES.fairMarketValue));
+  const assessedValue = parseNumber(findValue(record, FIELD_ALIASES.assessedValue));
+  const marketValue = fairMarketValue ?? (assessedValue !== null ? assessedValue / 0.4 : null);
   const lastSaleDate = findValue(record, FIELD_ALIASES.lastSaleDate);
   const lastSaleYear = findValue(record, FIELD_ALIASES.lastSaleYear);
   const mailingAddress = findValue(record, FIELD_ALIASES.mailingAddress);
@@ -492,6 +597,9 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   const mortgageYear = parseYearFromText(findValue(record, FIELD_ALIASES.mortgageDate));
   const transferSignal = findValue(record, FIELD_ALIASES.lastTransferType);
   const foreclosureStatus = findValue(record, FIELD_ALIASES.foreclosureStatus);
+  const homesteadExemption = findValue(record, FIELD_ALIASES.homesteadExemption);
+  const seniorExemption = findValue(record, FIELD_ALIASES.seniorExemption);
+  const vacancyFlag = findValue(record, FIELD_ALIASES.vacancyFlag);
   const schoolRating = parseNumber(findValue(record, FIELD_ALIASES.schoolRating));
   const schoolPremium = findValue(record, FIELD_ALIASES.schoolPremium);
   const schoolPerformanceScore = parseNumber(findValue(record, FIELD_ALIASES.schoolPerformanceScore));
@@ -524,18 +632,22 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   const equityFromValue = estimatedEquity !== null && marketValue ? estimatedEquity / marketValue : null;
   const equityRatio = equityRatioInput ?? equityFromValue ?? (estimatedLtv !== null ? 1 - estimatedLtv : null);
   const ownerIsCorporate = isCorporateOwner(ownerName);
+  const likelySingleFamily = isLikelySingleFamily(propertyType);
+  const sameAddressOwner = Boolean(propertyAddress && mailingAddress && addressesMatch(propertyAddress, mailingAddress));
+  const verifiedHomestead = hasKnownSignal(homesteadExemption) && isTruthySignal(homesteadExemption);
+  const ownerOccupiedLike = sameAddressOwner || verifiedHomestead;
 
   const passes: string[] = [];
   const warnings: string[] = [];
   const failures: string[] = [];
   const flags: string[] = [];
 
-  let score = 20;
   let scoreCap = 100;
   let motivationRaw = 0;
   let fitRaw = 0;
   let confidenceRaw = 0;
   let missingDataPenalty = 0;
+  let executionFitBonus = 0;
   let usedMortgageAsEquitySignal = false;
 
   const addReason = (reasonType: ReasonType, message: string) => {
@@ -558,15 +670,27 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     passes.push(message);
   };
 
-  const apply = (points: number, message: string, category: ScoreCategory, reasonType: ReasonType) => {
-    score += points;
+  const apply = (
+    points: number,
+    message: string,
+    category: ScoreCategory,
+    reasonType: ReasonType,
+    capExecutionFit = false,
+  ) => {
+    let effectivePoints = points;
+
+    if (capExecutionFit && points > 0) {
+      const remainingFitBonus = Math.max(0, EXECUTION_FIT_BONUS_LIMIT - executionFitBonus);
+      effectivePoints = Math.min(points, remainingFitBonus);
+      executionFitBonus += effectivePoints;
+    }
 
     if (category === "motivation") {
-      motivationRaw += points;
+      motivationRaw += effectivePoints;
     } else if (category === "fit") {
-      fitRaw += points;
+      fitRaw += effectivePoints;
     } else {
-      confidenceRaw += points;
+      confidenceRaw += effectivePoints;
     }
 
     addReason(reasonType, message);
@@ -576,16 +700,17 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     warnings.push(message);
 
     if (missingDataPenalty > MISSING_DATA_PENALTY_LIMIT) {
-      score -= 3;
       confidenceRaw -= 3;
       missingDataPenalty -= 3;
     }
   };
 
   if (county || propertyCity) {
-    if (isTargetArea(county, propertyCity)) {
+    const targetArea = getTargetAreaMatch(county, propertyCity, propertyZip);
+
+    if (targetArea.isTarget) {
       apply(12, "North Fulton or South Forsyth target area", "fit", "pass");
-      apply(3, "High-demand local resale corridor", "fit", "pass");
+      apply(2, targetArea.label, targetArea.isPrecise ? "confidence" : "fit", targetArea.isPrecise ? "pass" : "warning");
     } else {
       apply(-18, "Outside North Fulton or South Forsyth", "fit", "failure");
       scoreCap = Math.min(scoreCap, 39);
@@ -607,15 +732,13 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (ownershipYears !== null) {
     if (ownershipYears < 3) {
-      apply(-15, "Recent sale under 3 years", "motivation", "failure");
-    } else if (ownershipYears >= 25) {
-      apply(15, `Owned ${ownershipYears}+ years`, "motivation", "flag");
+      apply(-18, "Recent sale under 3 years", "motivation", "failure");
     } else if (ownershipYears >= 15) {
-      apply(12, `Owned ${ownershipYears}+ years`, "motivation", "flag");
-    } else if (ownershipYears >= 10) {
-      apply(8, `Owned ${ownershipYears}+ years`, "motivation", "pass");
+      apply(10, `Owned ${ownershipYears}+ years`, "motivation", "flag");
+    } else if (ownershipYears >= 8) {
+      apply(6, `Owned ${ownershipYears}+ years`, "motivation", "pass");
     } else if (ownershipYears >= 5) {
-      apply(4, `Owned ${ownershipYears}+ years`, "motivation", "pass");
+      apply(3, `Owned ${ownershipYears}+ years`, "motivation", "pass");
     } else {
       apply(0, `Owned ${ownershipYears}+ years`, "confidence", "warning");
     }
@@ -624,14 +747,20 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   }
 
   if (marketValue !== null) {
+    const localValueCeiling = getLocalValueCeiling(county, propertyCity, propertyZip);
+
     if (marketValue < 200000) {
       apply(-8, "Value under $200,000", "fit", "failure");
-    } else if (marketValue <= 1500000) {
-      apply(6, "Local value band fit", "fit", "pass");
-    } else if (marketValue <= 2000000) {
-      apply(-4, "Luxury value over $1.5M", "fit", "failure");
+    } else if (marketValue <= localValueCeiling) {
+      apply(4, "Submarket value band fit", "fit", "pass");
+    } else if (ownershipYears !== null && ownershipYears >= 10 && equityRatio !== null && equityRatio >= 0.4) {
+      apply(3, "Luxury high-equity owner still worth outreach", "motivation", "pass");
     } else {
-      apply(-8, "Luxury value over $2M", "fit", "failure");
+      apply(-2, "Luxury value needs stronger motivation", "fit", "warning");
+    }
+
+    if (fairMarketValue === null && assessedValue !== null) {
+      apply(2, "Assessed value normalized to estimated fair market value", "confidence", "pass");
     }
   } else {
     addMissing("Missing market or assessed value");
@@ -639,7 +768,7 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (ownerName) {
     if (isProbateOrInherited(ownerName, transferSignal)) {
-      apply(12, "Probate, trust, or estate signal", "motivation", "flag");
+      apply(18, "Probate, trust, or estate signal", "motivation", "flag");
     } else if (!ownerIsCorporate) {
       apply(3, "Natural person owner", "motivation", "pass");
     }
@@ -651,7 +780,7 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
         } else if (ownerPropertyCount > 25) {
           apply(-4, "Large portfolio owner", "fit", "failure");
         } else if (ownerPropertyCount >= 11) {
-          apply(4, "Mid-size landlord", "motivation", "flag");
+          apply(5, "Mid-size landlord", "motivation", "flag");
         } else if (ownerPropertyCount >= 2) {
           apply(8, "Small landlord", "motivation", "flag");
         } else {
@@ -668,8 +797,8 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   if (mailingState) {
     if (propertyState !== mailingState) {
       apply(10, "Out-of-state absentee", "motivation", "flag");
-    } else if (propertyAddress && mailingAddress && !addressesMatch(propertyAddress, mailingAddress)) {
-      apply(7, "In-state absentee", "motivation", "flag");
+    } else if (propertyAddress && mailingAddress && !sameAddressOwner) {
+      apply(6, "In-state absentee", "motivation", "flag");
     } else if (ownershipYears !== null && ownershipYears >= 15) {
       apply(4, "Owner-occupied with long tenure", "motivation", "pass");
     } else {
@@ -683,50 +812,71 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     addMissing("Missing mailing address");
   }
 
+  if (hasKnownSignal(homesteadExemption)) {
+    if (isTruthySignal(homesteadExemption)) {
+      apply(-6, "Verified owner-occupied homestead", "motivation", "failure");
+      apply(3, "Homestead status verified", "confidence", "pass");
+    } else if (isFalseySignal(homesteadExemption) && likelySingleFamily) {
+      apply(7, "No homestead on likely SFR", "motivation", "flag");
+      apply(3, "Homestead status verified", "confidence", "pass");
+    }
+  }
+
+  if (seniorExemption && isTruthySignal(seniorExemption)) {
+    apply(6, "Senior exemption lifecycle signal", "motivation", "flag");
+    apply(2, "Senior exemption verified", "confidence", "pass");
+  }
+
+  if (vacancyFlag && isTruthySignal(vacancyFlag)) {
+    apply(8, "Property-level vacancy indicator", "motivation", "flag");
+  }
+
   if (equityRatio !== null) {
-    if (equityRatio >= 0.5) {
+    if (equityRatio >= 0.6) {
       apply(15, "High-equity owner", "motivation", "flag");
-    } else if (equityRatio >= 0.35) {
+    } else if (equityRatio >= 0.4) {
       apply(10, "Meaningful equity estimate", "motivation", "pass");
     } else if (equityRatio >= 0.2) {
       apply(4, "Moderate equity estimate", "motivation", "pass");
     } else {
       apply(-2, "Low estimated equity", "motivation", "failure");
+
+      if (ownerOccupiedLike) {
+        apply(-8, "Verified owner-occupant with low equity", "motivation", "failure");
+      }
     }
   } else if (activeMortgage && hasNoActiveMortgage(activeMortgage)) {
-    apply(12, "Free and clear", "motivation", "flag");
+    apply(15, "Free and clear", "motivation", "flag");
     usedMortgageAsEquitySignal = true;
   } else {
     addMissing("Missing equity or LTV estimate");
   }
 
   if (activeMortgage && hasNoActiveMortgage(activeMortgage) && !usedMortgageAsEquitySignal) {
-    apply(12, "Free and clear", "motivation", "flag");
+    apply(15, "Free and clear", "motivation", "flag");
   } else if (inferredMortgageAge !== null) {
-    if (inferredMortgageAge >= 25) {
-      apply(12, "Mortgage age 25+ years", "motivation", "pass");
-    } else if (inferredMortgageAge >= 15) {
-      apply(8, "Mortgage age 15+ years", "motivation", "pass");
+    if (inferredMortgageAge >= 12) {
+      apply(5, "Mortgage age 12+ years", "motivation", "pass");
     } else if (inferredMortgageAge >= 8) {
-      apply(4, "Mortgage age 8+ years", "motivation", "pass");
+      apply(3, "Mortgage age 8+ years", "motivation", "pass");
     }
   }
 
   if (isOwnershipTransferSignal(transferSignal)) {
-    apply(10, "Ownership transfer anomaly", "motivation", "flag");
+    apply(8, "Ownership transfer anomaly", "motivation", "flag");
   }
 
   if (isVerifiedTaxDistress(taxStatus, taxDue, foreclosureStatus)) {
-    apply(12, "Verified tax or foreclosure distress", "motivation", "flag");
+    apply(18, "Verified tax or foreclosure distress", "motivation", "flag");
   }
 
   if (yearBuilt !== null) {
     if (yearBuilt < 1985) {
-      apply(8, "Older home with renovation upside", "fit", "pass");
+      apply(4, "Older home with renovation upside", "fit", "pass", true);
     } else if (yearBuilt < 2000) {
-      apply(6, "Likely cosmetic renovation need", "fit", "pass");
+      apply(3, "Likely cosmetic renovation need", "fit", "pass", true);
     } else if (yearBuilt < 2010) {
-      apply(3, "Post-1995 home kept in scoring model", "fit", "pass");
+      apply(1, "Post-1995 home kept in scoring model", "fit", "pass", true);
     } else {
       apply(0, "Newer home; no age penalty", "fit", "pass");
     }
@@ -735,11 +885,11 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   }
 
   if (lastPermitYear !== null && CURRENT_YEAR - lastPermitYear >= 15) {
-    apply(3, "No recent permit or renovation signal", "fit", "pass");
+    apply(2, "No recent permit or renovation signal", "fit", "pass", true);
   }
 
   if (/poor|fair|dated|needs|deferred|original|as[-\s]?is/i.test(condition)) {
-    apply(6, "Condition suggests renovation need", "fit", "flag");
+    apply(4, "Condition suggests renovation need", "fit", "flag", true);
   } else if (/excellent|renovated|updated|remodeled/i.test(condition)) {
     apply(-2, "Recently updated condition", "fit", "failure");
   }
@@ -754,12 +904,12 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (schoolRating !== null) {
     if (schoolRating >= 8) {
-      apply(5, "Premium school rating", "fit", "pass");
+      apply(2, "Premium school rating", "fit", "pass", true);
     } else if (schoolRating >= 6) {
-      apply(3, "Solid school rating", "fit", "pass");
+      apply(1, "Solid school rating", "fit", "pass", true);
     }
   } else if (schoolPremium && isTruthySignal(schoolPremium)) {
-    apply(5, "School-district premium", "fit", "pass");
+    apply(2, "School-district premium", "fit", "pass", true);
   }
 
   if (assignedElementary || assignedMiddle || assignedHigh) {
@@ -768,45 +918,45 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (schoolPerformanceScore !== null) {
     if (schoolPerformanceScore >= 92) {
-      apply(8, "Premium school performance", "fit", "flag");
+      apply(3, "Premium school performance", "fit", "flag", true);
     } else if (schoolPerformanceScore >= 85) {
-      apply(6, "Strong school performance", "fit", "pass");
+      apply(2, "Strong school performance", "fit", "pass", true);
     } else if (schoolPerformanceScore >= 75) {
-      apply(3, "Solid school performance", "fit", "pass");
+      apply(1, "Solid school performance", "fit", "pass", true);
     } else if (schoolPerformanceScore < 65) {
       apply(-4, "Weaker school performance", "fit", "failure");
     }
   } else if (schoolPremiumScore !== null) {
     if (schoolPremiumScore >= 8) {
-      apply(6, "Premium school-zone score", "fit", "pass");
+      apply(3, "Premium school-zone score", "fit", "pass", true);
     } else if (schoolPremiumScore >= 5) {
-      apply(3, "Positive school-zone score", "fit", "pass");
+      apply(1, "Positive school-zone score", "fit", "pass", true);
     }
   }
 
   if (highSchoolGraduationRate !== null && highSchoolGraduationRate >= 95) {
-    apply(3, "High school graduation strength", "fit", "pass");
+    apply(1, "High school graduation strength", "fit", "pass", true);
   }
 
   if (censusMedianIncome !== null) {
     if (censusMedianIncome >= 180000) {
-      apply(4, "Very high-income tract", "fit", "pass");
+      apply(2, "Very high-income tract", "fit", "pass", true);
     } else if (censusMedianIncome >= 120000) {
-      apply(2, "High-income tract", "fit", "pass");
+      apply(1, "High-income tract", "fit", "pass", true);
     }
   }
 
   if (censusMedianHomeValue !== null) {
     if (censusMedianHomeValue >= 650000) {
-      apply(4, "Premium tract home values", "fit", "pass");
+      apply(2, "Premium tract home values", "fit", "pass", true);
     } else if (censusMedianHomeValue >= 450000) {
-      apply(2, "Strong tract home values", "fit", "pass");
+      apply(1, "Strong tract home values", "fit", "pass", true);
     }
   }
 
   if (censusOwnerOccupancyRate !== null) {
     if (censusOwnerOccupancyRate >= 0.75) {
-      apply(3, "High owner-occupancy neighborhood", "fit", "pass");
+      apply(1, "High owner-occupancy neighborhood", "fit", "pass", true);
     } else if (censusOwnerOccupancyRate < 0.5) {
       apply(2, "More rental-heavy neighborhood", "motivation", "pass");
     }
@@ -826,9 +976,9 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (fredCountyHpiGrowth !== null) {
     if (fredCountyHpiGrowth >= 0.2) {
-      apply(4, "County HPI supports equity growth", "motivation", "pass");
+      apply(2, "County HPI supports equity growth", "confidence", "pass");
     } else if (fredCountyHpiGrowth >= 0.1) {
-      apply(2, "County HPI shows price appreciation", "motivation", "pass");
+      apply(1, "County HPI shows price appreciation", "confidence", "pass");
     }
   }
 
@@ -842,7 +992,7 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (fredUnemploymentRate !== null) {
     if (fredUnemploymentRate <= 3.5) {
-      apply(2, "Stable Atlanta labor market", "fit", "pass");
+      apply(1, "Stable Atlanta labor market", "confidence", "pass");
     } else if (fredUnemploymentRate >= 5) {
       apply(3, "Local job-market stress", "motivation", "pass");
     }
@@ -850,34 +1000,39 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (osmAmenityScore !== null) {
     if (osmAmenityScore >= 8) {
-      apply(4, "Strong OSM amenity access", "fit", "pass");
+      apply(2, "Strong OSM amenity access", "fit", "pass", true);
     } else if (osmAmenityScore >= 5) {
-      apply(2, "Useful nearby amenities", "fit", "pass");
+      apply(1, "Useful nearby amenities", "fit", "pass", true);
     }
   }
 
   if (osmNearestPark !== null && osmNearestPark <= 0.75) {
-    apply(2, "Park access nearby", "fit", "pass");
+    apply(1, "Park access nearby", "fit", "pass", true);
   } else if (osmParkCount !== null && osmParkCount >= 2) {
-    apply(2, "Multiple parks within one mile", "fit", "pass");
+    apply(1, "Multiple parks within one mile", "fit", "pass", true);
   }
 
   if (osmNearestGrocery !== null && osmNearestGrocery <= 1) {
-    apply(2, "Grocery access within one mile", "fit", "pass");
+    apply(1, "Grocery access within one mile", "fit", "pass", true);
   } else if (osmGroceryCount !== null && osmGroceryCount >= 1) {
-    apply(1, "Grocery access nearby", "fit", "pass");
+    apply(1, "Grocery access nearby", "fit", "pass", true);
   }
 
   if (/^(yes|true|1)$/i.test(osmMajorRoadNearby)) {
     apply(-3, "Possible major-road noise exposure", "fit", "failure");
   }
 
-  const cappedScore = clampScore(Math.min(score, scoreCap));
+  const motivationScore = clampScore(30 + motivationRaw * 2.4);
+  const fitScore = clampScore(45 + fitRaw * 2.1);
+  const confidenceScore = clampScore(72 + confidenceRaw * 4);
+  const sellerLikelihoodScore = motivationScore;
+  const contactabilityScore = calculateContactabilityScore(phone, email, mailingAddress, ownerName);
+  const blendedQueueScore = clampScore(
+    sellerLikelihoodScore * 0.6 + fitScore * 0.25 + confidenceScore * 0.15,
+  );
+  const cappedScore = clampScore(Math.min(blendedQueueScore, scoreCap));
   const tier = getTier(cappedScore);
   const status = getStatus(tier);
-  const motivationScore = clampScore(35 + motivationRaw * 2.6);
-  const fitScore = clampScore(40 + fitRaw * 2.4);
-  const confidenceScore = clampScore(72 + confidenceRaw * 4);
   const strategy = chooseStrategy(flags, failures, tier);
 
   return {
@@ -885,6 +1040,8 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     status,
     tier,
     score: cappedScore,
+    sellerLikelihoodScore,
+    contactabilityScore,
     motivationScore,
     fitScore,
     confidenceScore,

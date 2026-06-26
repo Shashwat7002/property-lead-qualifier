@@ -116,7 +116,7 @@ export function ResultsTable({
                   <td>
                     <span className="score-pill">{result.score}</span>
                     <span className="score-breakdown">
-                      M {result.motivationScore} | F {result.fitScore} | C {result.confidenceScore}
+                      Seller {result.sellerLikelihoodScore} | Fit {result.fitScore} | Reach {result.contactabilityScore}
                     </span>
                     {externalSignals.length > 0 ? <span>{externalSignals.join(" | ")}</span> : null}
                   </td>
