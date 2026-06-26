@@ -26,6 +26,13 @@ CORPORATE_TERMS = [
     " capital", " asset", " fund",
 ]
 
+# Institutional-scale entity signals — triggers hard cap even if corporate (by name or volume)
+# Small LLCs / family entities without these terms are treated as portfolio-exit opportunities
+INSTITUTIONAL_TERMS = [
+    " reit", " bank", " financial", " mortgage", " builder",
+    " developer", " development", " construction", " hoa ",
+]
+
 # Submarket-specific value ceilings so Milton ($1.13M median) isn't penalised
 SUBMARKET_CEILINGS = {
     "milton":       3_000_000,
@@ -43,7 +50,6 @@ POSITIVE_MOTIVATION_FLAGS = {
     "No homestead on likely SFR", "Free and clear", "High-equity owner",
     "Owner-occupied with long tenure", "Mom-and-Pop landlord",
     "Ownership transfer anomaly",
-    "Premium school performance — North Fulton resale driver",
 }
 
 
@@ -144,8 +150,17 @@ class LeadEngine:
             apply(-4, "Unclear property type", "fit", "warning")
 
         # ── Ownership tenure ─────────────────────────────────────────────────
+        is_life_event_transfer = bool(re.search(
+            r"quit.?claim|estate|inherited|inheritance|divorce|sheriff|relocation|non.?arm|family transfer",
+            transfer_type,
+        ))
         if years_owned < 3:
-            apply(-18, "Recent sale under 3 years", "motivation", "failure")
+            if is_life_event_transfer:
+                # Inherited / divorce / relocation transfers aren't speculative flips — soften penalty
+                apply(-4, "Short tenure — life-event transfer (override)", "motivation", "warning")
+                warnings.append("Recent transfer under 3 yr — likely estate/divorce/relocation, verify before outreach")
+            else:
+                apply(-18, "Recent sale under 3 years", "motivation", "failure")
         elif years_owned >= 15:
             apply(10, f"Owned {years_owned}+ years", "motivation", "flag")
         elif years_owned >= 8:
@@ -166,15 +181,49 @@ class LeadEngine:
             apply(0, "Above submarket ceiling — verify listing motivation", "fit", "warning")
 
         # ── Probate / estate ─────────────────────────────────────────────────
-        if re.search(r'\b(ESTATE|HEIRS|HEIR|TRUSTEE|TRUST|EXECUTOR|ADMINISTRATOR|PROBATE)\b', owner_name) \
-                or "estate" in transfer_type:
-            apply(18, "Probate, trust, or estate signal", "motivation", "flag")
+        # Living trusts are common in affluent North Fulton suburbs — trust alone ≠ probate urgency.
+        # Only hard-signal terms (ESTATE/HEIRS/EXECUTOR/ADMINISTRATOR/PROBATE) or a corroborated
+        # TRUST (senior + OOS + long tenure + vacancy ≥2) warrant full +18 urgency.
+        is_true_probate = bool(
+            re.search(r'\b(ESTATE|HEIRS|HEIR|EXECUTOR|ADMINISTRATOR|PROBATE)\b', owner_name)
+            or "estate" in transfer_type
+            or "probate" in transfer_type
+        )
+        is_trust_only = bool(re.search(r'\b(TRUST|TRUSTEE)\b', owner_name)) and not is_true_probate
 
-        # ── Corporate owner ───────────────────────────────────────────────────
+        if is_true_probate:
+            apply(18, "Probate, trust, or estate signal", "motivation", "flag")
+        elif is_trust_only:
+            trust_corroborators = sum([
+                senior_exemption,
+                is_oos,
+                years_owned >= 15,
+                vacancy,
+            ])
+            if trust_corroborators >= 2:
+                # Enough corroboration — treat as succession/estate-planning urgency
+                apply(18, "Probate, trust, or estate signal", "motivation", "flag")
+            else:
+                # Living trust, insufficient corroboration — soft signal only
+                apply(6, "Living trust — possible succession planning", "motivation", "pass")
+                warnings.append("Trust name only — corroborate with senior exemption / OOS / long tenure")
+
+        # ── Corporate / entity owner ──────────────────────────────────────────
+        # Institutional entities (REITs, banks, builders, ≥10-unit operators) → hard cap.
+        # Family LLCs / small landlord entities (≤10 props, no institutional terms) →
+        # portfolio-exit opportunity — treat like Mom-and-Pop with entity wrapper.
         is_corporate = _is_corporate(owner_name)
         if is_corporate:
-            apply(-15, "Corporate entity owner — excluded per ownership filter", "fit", "failure")
-            score_cap = min(score_cap, 39)
+            if _is_institutional(owner_name, total_props):
+                apply(-15, "Institutional entity owner — excluded per ownership filter", "fit", "failure")
+                score_cap = min(score_cap, 39)
+            else:
+                # Small family / landlord LLC — eligible for portfolio-exit listing conversion
+                apply(5, "Small-entity owner — portfolio-exit listing candidate", "motivation", "pass")
+                if 2 <= total_props <= 5:
+                    apply(5, "Mom-and-Pop landlord", "motivation", "flag")
+                elif total_props > 5:
+                    apply(2, "Small multi-property entity", "motivation", "pass")
         else:
             apply(3, "Natural person owner", "motivation", "pass")
             if 2 <= total_props <= 5:
@@ -241,7 +290,9 @@ class LeadEngine:
             elif year_built < 1995:
                 apply(3, "Pre-1995 home", "fit", "pass", True)
             elif year_built < 2010:
-                apply(0, "1995–2009 home — neutral age signal", "fit", "pass")
+                # 1995–2009 homes are entering the 18-30-yr renovation cycle in North Fulton —
+                # roofs, HVAC, windows, kitchens; owners are primed to sell rather than renovate
+                apply(5, "1995–2009 home — entering renovation cycle", "fit", "pass", True)
             else:
                 apply(-2, "Newer home (2010+) — lower renovation upside", "fit", "warning")
 
@@ -349,8 +400,8 @@ class LeadEngine:
         if school_score is not None:
             ss = float(school_score)
             if ss >= 92:
+                # School quality drives demand / liquidity (fit), NOT seller motivation
                 apply(3, "Premium school performance", "fit", "flag", True)
-                apply(4, "Premium school performance — North Fulton resale driver", "motivation", "flag")
             elif ss >= 85:
                 apply(2, "Strong school performance", "fit", "pass", True)
             elif ss >= 75:
@@ -407,6 +458,17 @@ def _is_corporate(name_upper: str) -> bool:
     return any(t in padded for t in CORPORATE_TERMS)
 
 
+def _is_institutional(name_upper: str, total_props: int) -> bool:
+    """Return True if the corporate entity shows institutional-scale signals.
+    Large volume (>10 props) or institutional name terms → hard cap applies.
+    Small LLCs / family holding entities without these terms → portfolio-exit path.
+    """
+    if total_props > 10:
+        return True
+    padded = " " + name_upper.lower() + " "
+    return any(t in padded for t in INSTITUTIONAL_TERMS)
+
+
 def _tier(score: int) -> str:
     if score >= 70:  return "HOT"
     if score >= 55:  return "WARM"
@@ -438,7 +500,7 @@ def _strategy(flags: list, failures: list, tier: str) -> str:
     if "School-stage lifecycle" in flags:                   return "School-stage mover — listing opportunity"
     if "Free and clear" in flags or "High-equity owner" in flags:
         return "Equity-rich seller — strong listing position"
-    if "Premium school performance — North Fulton resale driver" in flags:
+    if "Premium school performance" in flags:
         return "Premium school zone — fast-sale listing"
     if "Senior exemption lifecycle signal" in flags:        return "Senior downsizer — listing opportunity"
 

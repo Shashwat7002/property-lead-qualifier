@@ -103,8 +103,9 @@ class Enricher:
                 self._fred_ctx["mortgage_rate"] = float(obs["value"])
                 break
 
-        # Atlanta-Sandy Springs metro unemployment (monthly)
-        for obs in _fetch("ATLATSA647N"):
+        # Atlanta-Sandy Springs-Roswell metro unemployment (monthly)
+        # Series: ATLA013URN — confirmed correct per FRED (ATLATSA647N is a different series)
+        for obs in _fetch("ATLA013URN"):
             if obs["value"] != ".":
                 self._fred_ctx["unemployment"] = float(obs["value"])
                 break
