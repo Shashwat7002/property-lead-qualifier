@@ -156,6 +156,15 @@
     <p id="lastRun" class="hidden mt-3 text-xs text-slate-400">
       Last scan: <span id="lastRunTime"></span>
     </p>
+
+    <!-- Enrichment status badges -->
+    <div id="enrichmentStatus" class="hidden mt-3 flex flex-wrap gap-2">
+      <span class="text-xs text-slate-400 font-medium self-center">Enrichment:</span>
+      <span id="eBadgeFred"   class="text-xs px-2.5 py-1 rounded-full font-semibold border"></span>
+      <span id="eBadgeCensus" class="text-xs px-2.5 py-1 rounded-full font-semibold border"></span>
+      <span id="eBadgeOsm"    class="text-xs px-2.5 py-1 rounded-full font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">OSM Active</span>
+      <span id="eBadgeSchool" class="text-xs px-2.5 py-1 rounded-full font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">Schools Active</span>
+    </div>
   </div>
 
   <!-- RESULTS ────────────────────────────────────────────────────────────── -->
@@ -242,14 +251,14 @@
 
 <!-- ══ SETTINGS MODAL ═══════════════════════════════════════════════════════ -->
 <div id="settingsModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-bg bg-black/40">
-  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 fade-in">
-    <div class="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
-      <h3 class="text-base font-bold text-slate-800">First MLS API Settings</h3>
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 fade-in max-h-[90vh] flex flex-col">
+    <div class="px-6 py-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
+      <h3 class="text-base font-bold text-slate-800">API Settings</h3>
       <button onclick="closeSettings()" class="text-slate-400 hover:text-slate-600">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </div>
-    <div class="px-6 py-5 space-y-4">
+    <div class="px-6 py-5 space-y-4 overflow-y-auto">
       <div class="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl p-4">
         <div>
           <p class="text-sm font-semibold text-amber-800">Demo Mode</p>
@@ -278,6 +287,31 @@
             class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
         </div>
       </div>
+
+      <!-- Enrichment API keys (always editable) -->
+      <div class="border-t border-slate-100 pt-4 space-y-3">
+        <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Enrichment APIs <span class="normal-case font-normal text-slate-400">(free — optional but recommended)</span></p>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1.5">
+            FRED API Key
+            <a href="https://fred.stlouisfed.org/docs/api/api_key.html" target="_blank" rel="noopener"
+               class="ml-1 text-blue-500 font-normal hover:underline">Get free key →</a>
+          </label>
+          <input id="cfgFredKey" type="text" placeholder="Mortgage rate, HPI, unemployment"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1.5">
+            Census API Key
+            <a href="https://api.census.gov/data/key_signup.html" target="_blank" rel="noopener"
+               class="ml-1 text-blue-500 font-normal hover:underline">Get free key →</a>
+          </label>
+          <input id="cfgCensusKey" type="text" placeholder="Tract income, home values, age 65+"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <p class="text-xs text-slate-400">OSM (walkability) and school zone data require no key and are always active.</p>
+      </div>
+
       <p id="settingsSaved" class="hidden text-xs text-emerald-600 font-medium text-center pt-1">
         Settings saved successfully
       </p>
@@ -319,8 +353,10 @@
     const r = await fetch('/api/config');
     const d = await r.json();
     demoMode = d.demo_mode;
-    document.getElementById('cfgApiKey').value   = d.api_key   || '';
-    document.getElementById('cfgUsername').value = d.username  || '';
+    document.getElementById('cfgApiKey').value    = d.api_key        || '';
+    document.getElementById('cfgUsername').value  = d.username       || '';
+    document.getElementById('cfgFredKey').value   = d.fred_api_key   || '';
+    document.getElementById('cfgCensusKey').value = d.census_api_key || '';
     syncDemoUI();
   });
 
@@ -341,8 +377,11 @@
     const msgs = [
       'Connecting to First MLS…',
       'Pulling property records…',
-      'Applying qualification filters…',
-      'Scoring motivation signals…',
+      'Fetching FRED macro signals…',
+      'Geocoding addresses via Census…',
+      'Enriching with Census ACS tract data…',
+      'Pulling OSM walkability & amenity data…',
+      'Scoring motivation, fit, and confidence…',
       'Ranking leads by priority…',
     ];
     let mi = 0;
@@ -365,6 +404,7 @@
       allLeads = data.leads;
       updateStats(data.stats);
       renderTable('ALL');
+      showEnrichmentStatus(data.enrichment || {});
 
       document.getElementById('resultsSection').classList.remove('hidden');
       document.getElementById('lastRun').classList.remove('hidden');
@@ -585,6 +625,9 @@
           </div>` : ''}
       </div>
 
+      <!-- Enrichment data -->
+      ${buildEnrichmentSection(l)}
+
       <!-- Skip trace note -->
       <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-700">
         <strong>Skip Tracing:</strong> Phone and email fields are included in the CSV export.
@@ -600,6 +643,41 @@
       <p class="text-xs text-slate-400 mb-0.5">${label}</p>
       <p class="text-sm font-medium text-slate-700 break-words">${value}</p>
     </div>`;
+  }
+
+  function buildEnrichmentSection(l) {
+    const rows = [];
+    if (l.school_performance_score != null)
+      rows.push(detailRow('School Score (GOSA)', l.school_performance_score.toFixed(1) + ' / 100'));
+    if (l.fred_mortgage_rate != null)
+      rows.push(detailRow('30-Yr Mortgage Rate', l.fred_mortgage_rate.toFixed(2) + '%'));
+    if (l.fred_unemployment_rate != null)
+      rows.push(detailRow('Atlanta Unemployment', l.fred_unemployment_rate.toFixed(1) + '%'));
+    if (l.fred_hpi_growth != null)
+      rows.push(detailRow('Fulton Co. HPI Growth', (l.fred_hpi_growth * 100).toFixed(1) + '% YoY'));
+    if (l.census_median_income != null)
+      rows.push(detailRow('Tract Median Income', '$' + Math.round(l.census_median_income).toLocaleString()));
+    if (l.census_median_home_value != null)
+      rows.push(detailRow('Tract Median Home Value', '$' + Math.round(l.census_median_home_value).toLocaleString()));
+    if (l.census_owner_occupancy_rate != null)
+      rows.push(detailRow('Owner Occupancy Rate', (l.census_owner_occupancy_rate * 100).toFixed(0) + '%'));
+    if (l.census_age_65_plus_rate != null)
+      rows.push(detailRow('Age 65+ Rate', (l.census_age_65_plus_rate * 100).toFixed(1) + '%'));
+    if (l.osm_amenity_score != null)
+      rows.push(detailRow('Walkability Score', l.osm_amenity_score + ' / 10'));
+    if (l.osm_nearest_grocery != null)
+      rows.push(detailRow('Nearest Grocery', l.osm_nearest_grocery + ' mi'));
+    if (l.osm_nearest_park != null)
+      rows.push(detailRow('Nearest Park', l.osm_nearest_park + ' mi'));
+    if (l.osm_major_road_nearby != null)
+      rows.push(detailRow('Major Road Nearby', l.osm_major_road_nearby ? 'Yes ⚠' : 'No'));
+
+    if (!rows.length) return '';
+    return `
+      <div class="border-t border-slate-100 pt-4">
+        <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Enrichment Data</p>
+        <div class="grid grid-cols-2 gap-3">${rows.join('')}</div>
+      </div>`;
   }
 
   function closeDetail() {
@@ -664,10 +742,12 @@
       method:  'POST',
       headers: {'Content-Type': 'application/json'},
       body:    JSON.stringify({
-        api_key:   document.getElementById('cfgApiKey').value,
-        username:  document.getElementById('cfgUsername').value,
-        password:  document.getElementById('cfgPassword').value,
-        demo_mode: demoMode,
+        api_key:        document.getElementById('cfgApiKey').value,
+        username:       document.getElementById('cfgUsername').value,
+        password:       document.getElementById('cfgPassword').value,
+        demo_mode:      demoMode,
+        fred_api_key:   document.getElementById('cfgFredKey').value,
+        census_api_key: document.getElementById('cfgCensusKey').value,
       }),
     });
     const d = await r.json();
@@ -675,6 +755,23 @@
       document.getElementById('settingsSaved').classList.remove('hidden');
       setTimeout(closeSettings, 1200);
     }
+  }
+
+  // ── Enrichment status ────────────────────────────────────────────────────
+  function showEnrichmentStatus(e) {
+    function badge(id, active, activeLabel, inactiveLabel) {
+      const el = document.getElementById(id);
+      if (active) {
+        el.className = 'text-xs px-2.5 py-1 rounded-full font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200';
+        el.textContent = activeLabel;
+      } else {
+        el.className = 'text-xs px-2.5 py-1 rounded-full font-semibold border bg-slate-100 text-slate-400 border-slate-200';
+        el.textContent = inactiveLabel;
+      }
+    }
+    badge('eBadgeFred',   e.fred,   'FRED Active',   'FRED — no key');
+    badge('eBadgeCensus', e.census, 'Census Active', 'Census — no key');
+    document.getElementById('enrichmentStatus').classList.remove('hidden');
   }
 
   // ── Toast ─────────────────────────────────────────────────────────────────

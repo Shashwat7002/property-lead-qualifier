@@ -255,6 +255,96 @@ class LeadEngine:
         elif years_owned >= 20:
             apply(4, "Long-tenure lifecycle signal", "motivation", "pass")
 
+        # ── FRED macro signals ────────────────────────────────────────────────
+        fred_mortgage = prop.get("fred_mortgage_rate")
+        fred_unemp    = prop.get("fred_unemployment_rate")
+        fred_hpi      = prop.get("fred_hpi_growth")
+
+        if fred_mortgage is not None:
+            if float(fred_mortgage) >= 6.25:
+                if is_oos or is_instate:
+                    apply(2, "Higher-rate environment may pressure non-owner holdings", "motivation", "pass")
+                elif years_owned >= 5:
+                    apply(-2, "Rate-lock headwind for owner-occupied sellers", "motivation", "failure")
+
+        if fred_unemp is not None:
+            if float(fred_unemp) <= 3.5:
+                apply(1, "Stable Atlanta labor market", "confidence", "pass")
+            elif float(fred_unemp) >= 5.0:
+                apply(3, "Local job-market stress — may accelerate seller decisions", "motivation", "pass")
+
+        if fred_hpi is not None:
+            if float(fred_hpi) >= 0.20:
+                apply(2, "Strong county HPI growth — equity build confirmed", "confidence", "pass")
+            elif float(fred_hpi) >= 0.10:
+                apply(1, "Positive county HPI — appreciating market", "confidence", "pass")
+
+        # ── Census tract signals ──────────────────────────────────────────────
+        census_income  = prop.get("census_median_income")
+        census_home    = prop.get("census_median_home_value")
+        census_oo_rate = prop.get("census_owner_occupancy_rate")
+        census_vac     = prop.get("census_vacancy_rate")
+        census_age65   = prop.get("census_age_65_plus_rate")
+
+        if census_income is not None:
+            ci = float(census_income)
+            if ci >= 180_000:
+                apply(2, "Very high-income census tract", "fit", "pass", True)
+            elif ci >= 120_000:
+                apply(1, "High-income census tract", "fit", "pass", True)
+
+        if census_home is not None:
+            ch = float(census_home)
+            if ch >= 650_000:
+                apply(2, "Premium tract median home values", "fit", "pass", True)
+            elif ch >= 450_000:
+                apply(1, "Strong tract median home values", "fit", "pass", True)
+
+        if census_oo_rate is not None:
+            oo = float(census_oo_rate)
+            if oo >= 0.75:
+                apply(1, "High owner-occupancy neighborhood", "fit", "pass", True)
+            elif oo < 0.50:
+                apply(2, "Rental-heavy neighborhood — landlord turnover likely", "motivation", "pass")
+
+        if census_age65 is not None:
+            a = float(census_age65)
+            if a >= 0.18:
+                apply(4, "Older-neighborhood lifecycle signal", "motivation", "flag")
+            elif a >= 0.12:
+                apply(2, "Mature-neighborhood lifecycle signal", "motivation", "pass")
+
+        if census_vac is not None and float(census_vac) >= 0.06:
+            apply(2, "Higher local vacancy rate — selling pressure in area", "motivation", "pass")
+
+        # ── OSM / amenity signals ─────────────────────────────────────────────
+        osm_score   = prop.get("osm_amenity_score")
+        osm_grocery = prop.get("osm_grocery_count")
+        osm_park    = prop.get("osm_park_count")
+        osm_near_g  = prop.get("osm_nearest_grocery")
+        osm_near_p  = prop.get("osm_nearest_park")
+        osm_road    = prop.get("osm_major_road_nearby", False)
+
+        if osm_score is not None:
+            os_ = float(osm_score)
+            if os_ >= 8:
+                apply(2, "Strong walkability and amenity access", "fit", "pass", True)
+            elif os_ >= 5:
+                apply(1, "Useful nearby amenities", "fit", "pass", True)
+
+        if osm_near_g is not None and float(osm_near_g) <= 1.0:
+            apply(1, "Grocery access within one mile", "fit", "pass", True)
+        elif osm_grocery is not None and int(osm_grocery) >= 1:
+            apply(1, "Grocery access nearby", "fit", "pass", True)
+
+        if osm_near_p is not None and float(osm_near_p) <= 0.75:
+            apply(1, "Park access within 0.75 miles", "fit", "pass", True)
+        elif osm_park is not None and int(osm_park) >= 2:
+            apply(1, "Multiple parks within one mile", "fit", "pass", True)
+
+        if osm_road:
+            apply(-3, "Possible major-road noise exposure", "fit", "failure")
+
         # ── School performance (GOSA ≥92 = $150K–$200K buyer premium in N. Fulton)
         if school_score is not None:
             ss = float(school_score)
