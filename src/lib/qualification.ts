@@ -329,7 +329,7 @@ function isProbateOrInherited(ownerName: string, transferSignal: string): boolea
 }
 
 function isOwnershipTransferSignal(transferSignal: string): boolean {
-  return /quit[\s-]?claim|intra[-\s]?family|family transfer|non[-\s]?arm|trust transfer|estate|heir|probate|executor|administrator/i.test(
+  return /quit[\s-]?claim|intra[-\s]?family|family transfer|non[-\s]?arm|trust transfer|estate|heir|probate|executor|administrator|divorce|dissolution of marriage|legal separation|marital settlement|sheriff.?s?\s*(deed|sale)|tax\s*(deed|sale)|relocation (transfer|deed)|corporate relocation/i.test(
     transferSignal,
   );
 }
@@ -498,22 +498,37 @@ function chooseStrategy(flags: string[], failures: string[], tier: LeadTier): st
       : "Discard - poor fit";
   }
 
-  if (flags.includes("Probate, trust, or estate signal")) {
+  // Compound strategies — highest-GCI combinations, checked first
+  const hasOos = flags.includes("Out-of-state absentee");
+  const hasProbate = flags.includes("Probate, trust, or estate signal");
+  const hasDistress = flags.includes("Verified tax or foreclosure distress");
+
+  if (hasProbate && hasDistress) {
+    return "Estate in distress — highest urgency listing";
+  }
+  if (hasProbate && hasOos) {
+    return "Estate + absentee — call today";
+  }
+  if (hasDistress && hasOos) {
+    return "Distressed absentee — urgent outreach";
+  }
+
+  // Single-signal strategies
+  if (hasProbate) {
     return "Estate transition";
   }
-
-  if (flags.includes("Verified tax or foreclosure distress")) {
+  if (hasDistress) {
     return "Motivated seller — timeline pressure";
   }
-
   if (flags.includes("Mom-and-Pop landlord")) {
     return "Portfolio exit — listing conversion";
   }
-
-  if (flags.includes("Out-of-state absentee") || flags.includes("In-state absentee")) {
+  if (hasOos || flags.includes("In-state absentee")) {
     return "Absentee owner";
   }
-
+  if (flags.includes("School-stage lifecycle")) {
+    return "School-stage mover — North Fulton upsizer/downsizer";
+  }
   if (flags.includes("Empty-nest probability")) {
     return "Empty-nest downsizer — listing opportunity";
   }
@@ -868,6 +883,10 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     apply(8, "Empty-nest probability", "motivation", "flag");
   } else if (ownershipYears !== null && bedrooms !== null && bedrooms >= 3 && ownershipYears >= 15) {
     apply(6, "Empty-nest probability", "motivation", "flag");
+  } else if (ownershipYears !== null && bedrooms !== null && bedrooms >= 4 && ownershipYears >= 10) {
+    // North Fulton-specific: families buy 4+ BR for school zone access; at 10+ yr tenure
+    // the school stage is likely complete and the oversized home becomes a listing trigger
+    apply(4, "School-stage lifecycle", "motivation", "flag");
   } else if (ownershipYears !== null && ownershipYears >= 20) {
     apply(4, "Long-tenure lifecycle signal", "motivation", "pass");
   }
@@ -1001,7 +1020,7 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   const POSITIVE_MOTIVATION_FLAGS = [
     "Out-of-state absentee", "In-state absentee", "Probate, trust, or estate signal",
     "Verified tax or foreclosure distress", "Property-level vacancy indicator",
-    "Empty-nest probability", "Senior exemption lifecycle signal",
+    "Empty-nest probability", "School-stage lifecycle", "Senior exemption lifecycle signal",
     "No homestead on likely SFR", "Free and clear", "High-equity owner",
     "Owner-occupied with long tenure", "Mom-and-Pop landlord",
     "Ownership transfer anomaly", "Premium school performance — North Fulton resale driver",
@@ -1010,6 +1029,20 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   if (!hasPositiveMotivationFlag && motivationRaw <= 2) {
     scoreCap = Math.min(scoreCap, 38);
     warnings.push("No seller motivation signals detected — capped below tier-C");
+  }
+
+  // Primary qualifier guard: per spec, A-tier requires OOS absentee + 10+ yr tenure together.
+  // OOS alone (without confirmed long tenure or a co-occurring distress/probate/vacancy signal)
+  // is WARM, not HOT — cap at B-tier max (54) to protect A-tier queue quality.
+  const hasOosFlag = flags.includes("Out-of-state absentee");
+  const hasConfirmedLongTenure = ownershipYears !== null && ownershipYears >= 10;
+  const hasOverridingDistress = flags.some((f) =>
+    ["Probate, trust, or estate signal", "Verified tax or foreclosure distress",
+     "Property-level vacancy indicator", "Ownership transfer anomaly"].includes(f),
+  );
+  if (hasOosFlag && !hasConfirmedLongTenure && !hasOverridingDistress) {
+    scoreCap = Math.min(scoreCap, 54);
+    warnings.push("OOS absentee without confirmed 10+ yr tenure — capped at B-tier; verify last sale date");
   }
 
   const motivationScore = clampScore(30 + motivationRaw * 2.4);
