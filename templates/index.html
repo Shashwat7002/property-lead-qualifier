@@ -160,8 +160,9 @@
     <!-- Enrichment status badges -->
     <div id="enrichmentStatus" class="hidden mt-3 flex flex-wrap gap-2">
       <span class="text-xs text-slate-400 font-medium self-center">Enrichment:</span>
-      <span id="eBadgeFred"   class="text-xs px-2.5 py-1 rounded-full font-semibold border"></span>
+      <span id="eBadgeFred"    class="text-xs px-2.5 py-1 rounded-full font-semibold border"></span>
       <span id="eBadgeCensus" class="text-xs px-2.5 py-1 rounded-full font-semibold border"></span>
+      <span id="eBadgeGsccca" class="text-xs px-2.5 py-1 rounded-full font-semibold border"></span>
       <span id="eBadgeOsm"    class="text-xs px-2.5 py-1 rounded-full font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">OSM Active</span>
       <span id="eBadgeSchool" class="text-xs px-2.5 py-1 rounded-full font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">Schools Active</span>
     </div>
@@ -312,6 +313,22 @@
         <p class="text-xs text-slate-400">OSM (walkability) and school zone data require no key and are always active.</p>
       </div>
 
+      <!-- GSCCCA deed history -->
+      <div class="border-t border-slate-100 pt-4 space-y-3">
+        <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">GSCCCA Deed History <span class="normal-case font-normal text-slate-400">(free account — pulls years owned &amp; transfer type)</span></p>
+        <p class="text-xs text-slate-400">Georgia statewide deed index — register free at <a href="https://www.gsccca.org/register" target="_blank" rel="noopener" class="text-blue-500 hover:underline">gsccca.org/register</a></p>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1.5">GSCCCA Username</label>
+          <input id="cfgGsccaUser" type="text" placeholder="your@email.com"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1.5">GSCCCA Password</label>
+          <input id="cfgGsccaPass" type="password" placeholder="••••••••"
+            class="w-full border border-slate-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+      </div>
+
       <p id="settingsSaved" class="hidden text-xs text-emerald-600 font-medium text-center pt-1">
         Settings saved successfully
       </p>
@@ -355,8 +372,10 @@
     demoMode = d.demo_mode;
     document.getElementById('cfgApiKey').value    = d.api_key        || '';
     document.getElementById('cfgUsername').value  = d.username       || '';
-    document.getElementById('cfgFredKey').value   = d.fred_api_key   || '';
-    document.getElementById('cfgCensusKey').value = d.census_api_key || '';
+    document.getElementById('cfgFredKey').value    = d.fred_api_key    || '';
+    document.getElementById('cfgCensusKey').value  = d.census_api_key  || '';
+    document.getElementById('cfgGsccaUser').value  = d.gsccca_username || '';
+    document.getElementById('cfgGsccaPass').value  = d.gsccca_password || '';
     syncDemoUI();
   });
 
@@ -746,8 +765,10 @@
         username:       document.getElementById('cfgUsername').value,
         password:       document.getElementById('cfgPassword').value,
         demo_mode:      demoMode,
-        fred_api_key:   document.getElementById('cfgFredKey').value,
-        census_api_key: document.getElementById('cfgCensusKey').value,
+        fred_api_key:     document.getElementById('cfgFredKey').value,
+        census_api_key:   document.getElementById('cfgCensusKey').value,
+        gsccca_username:  document.getElementById('cfgGsccaUser').value,
+        gsccca_password:  document.getElementById('cfgGsccaPass').value,
       }),
     });
     const d = await r.json();
@@ -769,8 +790,9 @@
         el.textContent = inactiveLabel;
       }
     }
-    badge('eBadgeFred',   e.fred,   'FRED Active',   'FRED — no key');
-    badge('eBadgeCensus', e.census, 'Census Active', 'Census — no key');
+    badge('eBadgeFred',    e.fred,    'FRED Active',    'FRED — no key');
+    badge('eBadgeCensus', e.census,  'Census Active',  'Census — no key');
+    badge('eBadgeGsccca', e.gsccca,  'GSCCCA Active',  'GSCCCA — no account');
     document.getElementById('enrichmentStatus').classList.remove('hidden');
   }
 

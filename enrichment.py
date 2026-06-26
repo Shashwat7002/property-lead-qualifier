@@ -18,8 +18,11 @@ import hashlib
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
 
 import requests
+
+from gsccca_client import GsccaClient
 
 # ---------------------------------------------------------------------------
 # Static GOSA school performance index by ZIP
@@ -69,13 +72,18 @@ TIMEOUT_LONG  = 16
 
 class Enricher:
 
-    def __init__(self, fred_key: str = "", census_key: str = ""):
+    def __init__(self, fred_key: str = "", census_key: str = "",
+                 gsccca_username: str = "", gsccca_password: str = ""):
         self.fred_key    = fred_key.strip()
         self.census_key  = census_key.strip()
         self._fred_ctx   = {}        # populated once per scan
         self._geo_cache  = {}        # address hash → (lat, lng, tract_geoid)
         self._tract_cache = {}       # tract_geoid → census dict
         self._osm_cache  = {}        # (rounded_lat, rounded_lng) → osm dict
+        self.gsccca: Optional[GsccaClient] = (
+            GsccaClient(gsccca_username, gsccca_password)
+            if gsccca_username and gsccca_password else None
+        )
 
     # ── Public ───────────────────────────────────────────────────────────────
 
@@ -124,6 +132,7 @@ class Enricher:
         Enrich all properties in-place. Returns same list.
         School GOSA lookup is instant. FRED fields are already prefetched.
         Census + OSM run in parallel threads.
+        GSCCCA deed history runs sequentially with throttle (0.5 s/req).
         """
         for p in props:
             self._apply_school(p)
@@ -138,6 +147,10 @@ class Enricher:
                 except Exception:
                     pass
 
+        # GSCCCA deed history — throttled sequential (login once, then per-property)
+        if self.gsccca and self.gsccca.configured:
+            self._enrich_gsccca_batch(props)
+
         return props
 
     def status(self) -> dict:
@@ -147,7 +160,37 @@ class Enricher:
             "census":  bool(self.census_key),
             "osm":     True,        # always available (no key)
             "school":  True,        # static lookup, always available
+            "gsccca":  bool(self.gsccca and self.gsccca.configured),
         }
+
+    # ── GSCCCA deed history ───────────────────────────────────────────────────
+
+    def _enrich_gsccca_batch(self, props: list):
+        """
+        Login once, then look up each property sequentially with 0.5 s throttle.
+        Skips properties that already have years_owned > 0 (demo data or FMLS provided).
+        Writes years_owned, transfer_type, gsccca_verified back onto the dict.
+        """
+        if not self.gsccca:
+            return
+        if not self.gsccca.login():
+            return   # bad credentials or network error — degrade silently
+
+        for prop in props:
+            # Skip when the upstream already populated years_owned (e.g. demo data)
+            if prop.get("years_owned", 0) > 0:
+                continue
+
+            owner_name = (prop.get("owner_name") or "").strip()
+            county     = (prop.get("county") or "").strip()
+            if not owner_name or not county:
+                continue
+
+            result = self.gsccca.lookup_deed(owner_name, county)
+            if result:
+                prop.update(result)
+
+            time.sleep(0.5)   # ~2 req/sec to stay polite with GSCCCA servers
 
     # ── School ───────────────────────────────────────────────────────────────
 

@@ -19,3 +19,9 @@ DEMO_MODE     = True   # Set False once FMLS credentials are entered
 FRED_API_KEY   = ""    # FRED macro signals: mortgage rate, unemployment, HPI
 CENSUS_API_KEY = ""    # Census ACS: tract income, home values, age 65+, vacancy
 # OSM / Overpass and school zone lookup require no keys
+
+# ── GSCCCA deed history ───────────────────────────────────────────────────────
+# Georgia statewide deed index — pulls years_owned and transfer_type per property
+# Free account: https://www.gsccca.org/register
+GSCCCA_USERNAME = ""
+GSCCCA_PASSWORD = ""

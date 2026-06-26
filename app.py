@@ -21,8 +21,10 @@ engine = LeadEngine()
 
 def _make_enricher() -> Enricher:
     return Enricher(
-        fred_key    = getattr(cfg, "FRED_API_KEY",   "") or "",
-        census_key  = getattr(cfg, "CENSUS_API_KEY", "") or "",
+        fred_key         = getattr(cfg, "FRED_API_KEY",      "") or "",
+        census_key       = getattr(cfg, "CENSUS_API_KEY",    "") or "",
+        gsccca_username  = getattr(cfg, "GSCCCA_USERNAME",   "") or "",
+        gsccca_password  = getattr(cfg, "GSCCCA_PASSWORD",   "") or "",
     )
 
 
@@ -179,22 +181,26 @@ def export_csv():
 def api_config():
     if request.method == "GET":
         return jsonify({
-            "api_key":        cfg.FMLS_API_KEY,
-            "username":       cfg.FMLS_USERNAME,
-            "demo_mode":      cfg.DEMO_MODE,
-            "fred_api_key":   getattr(cfg, "FRED_API_KEY",   ""),
-            "census_api_key": getattr(cfg, "CENSUS_API_KEY", ""),
+            "api_key":          cfg.FMLS_API_KEY,
+            "username":         cfg.FMLS_USERNAME,
+            "demo_mode":        cfg.DEMO_MODE,
+            "fred_api_key":     getattr(cfg, "FRED_API_KEY",     ""),
+            "census_api_key":   getattr(cfg, "CENSUS_API_KEY",   ""),
+            "gsccca_username":  getattr(cfg, "GSCCCA_USERNAME",  ""),
+            "gsccca_password":  getattr(cfg, "GSCCCA_PASSWORD",  ""),
         })
 
     data      = request.json or {}
     cfg_path  = os.path.join(os.path.dirname(__file__), "config.py")
 
-    api_key        = data.get("api_key",        "").strip()
-    username       = data.get("username",        "").strip()
-    password       = data.get("password",        "").strip()
-    demo_mode      = bool(data.get("demo_mode",  True))
-    fred_api_key   = data.get("fred_api_key",   "").strip()
-    census_api_key = data.get("census_api_key", "").strip()
+    api_key          = data.get("api_key",          "").strip()
+    username         = data.get("username",          "").strip()
+    password         = data.get("password",          "").strip()
+    demo_mode        = bool(data.get("demo_mode",    True))
+    fred_api_key     = data.get("fred_api_key",     "").strip()
+    census_api_key   = data.get("census_api_key",   "").strip()
+    gsccca_username  = data.get("gsccca_username",  "").strip()
+    gsccca_password  = data.get("gsccca_password",  "").strip()
 
     with open(cfg_path, "w") as f:
         f.write("# Sprint Lead Generation — Configuration\n")
@@ -204,7 +210,9 @@ def api_config():
         f.write(f'FMLS_PASSWORD = "{password}"\n')
         f.write(f'DEMO_MODE     = {demo_mode}\n\n')
         f.write(f'FRED_API_KEY   = "{fred_api_key}"\n')
-        f.write(f'CENSUS_API_KEY = "{census_api_key}"\n')
+        f.write(f'CENSUS_API_KEY = "{census_api_key}"\n\n')
+        f.write(f'GSCCCA_USERNAME = "{gsccca_username}"\n')
+        f.write(f'GSCCCA_PASSWORD = "{gsccca_password}"\n')
 
     import importlib
     importlib.reload(cfg)
