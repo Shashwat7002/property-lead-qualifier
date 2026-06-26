@@ -49,7 +49,7 @@ POSITIVE_MOTIVATION_FLAGS = {
     "School-stage lifecycle", "Senior exemption lifecycle signal",
     "No homestead on likely SFR", "Free and clear", "High-equity owner",
     "Owner-occupied with long tenure", "Mom-and-Pop landlord",
-    "Ownership transfer anomaly",
+    "Ownership transfer anomaly", "Upgrade seller — move-up listing candidate",
 }
 
 
@@ -300,15 +300,42 @@ class LeadEngine:
             else:
                 apply(-1, "Pre-1985 home — dated systems and layouts reduce buyer demand", "fit", "warning", True)
 
-        # ── Lifecycle signals (empty-nest, school-stage) ─────────────────────
+        # ── Bedroom count → individual buyer appeal ──────────────────────────
+        # North Fulton / South Forsyth target buyer is an individual family,
+        # not an investor. Bedroom count is the primary listing marketability
+        # filter (listing-arsenal: target buyer = young families, move-up buyers).
+        if bedrooms >= 5:
+            apply(2, "5+ bedroom home — premium family buyer demand", "fit", "pass", True)
+        elif bedrooms >= 4:
+            apply(2, "4-bedroom home — ideal for North Fulton family buyers", "fit", "pass", True)
+        elif bedrooms >= 3:
+            apply(1, "3-bedroom home — broad individual buyer appeal", "fit", "pass", True)
+        elif 0 < bedrooms <= 2:
+            apply(-2, "2 or fewer bedrooms — limited individual buyer pool in this market", "fit", "warning", True)
+
+        # ── Lifecycle signals (empty-nest, school-stage, upgrade seller) ─────
+        # Sources: nurture-coach seller profiles — Downsizer, School-Stage,
+        # and Upgrade Seller archetypes. Each maps to a distinct listing conversation.
         if bedrooms >= 3 and years_owned >= 20:
             apply(8, "Empty-nest probability", "motivation", "flag")
         elif bedrooms >= 3 and years_owned >= 15:
             apply(6, "Empty-nest probability", "motivation", "flag")
         elif bedrooms >= 4 and years_owned >= 10:
             apply(4, "School-stage lifecycle", "motivation", "flag")
+        elif bedrooms == 3 and 7 <= years_owned <= 14 and homestead:
+            # Upgrade Seller (nurture-coach): 3-bed starter home with equity buildup.
+            # Owner is living in the home, likely outgrowing it — wants to upsize.
+            # Most common move-up seller in the North Fulton market.
+            apply(6, "Upgrade seller — move-up listing candidate", "motivation", "flag")
         elif years_owned >= 20:
             apply(4, "Long-tenure lifecycle signal", "motivation", "pass")
+
+        # ── Investor-magnet warning (individual buyer focus) ──────────────────
+        # Properties that combine severe distress + vacancy + pre-1985 build are
+        # more likely to attract cash investors / flippers than individual buyers.
+        # Flag so the listing agent can assess the realistic buyer pool.
+        if tax_delinquent and vacancy and year_built and year_built < 1985:
+            apply(-3, "Distressed vacant pre-1985 home — likely attracts investors over individual buyers", "fit", "warning")
 
         # ── FRED macro signals ────────────────────────────────────────────────
         fred_mortgage = prop.get("fred_mortgage_rate")
@@ -501,6 +528,7 @@ def _strategy(flags: list, failures: list, tier: str) -> str:
     if "Mom-and-Pop landlord" in flags:                     return "Portfolio exit — listing conversion"
     if has_oos or "In-state absentee" in flags:             return "Absentee owner — listing outreach"
     if "Empty-nest probability" in flags:                   return "Empty-nest downsizer — listing opportunity"
+    if "Upgrade seller — move-up listing candidate" in flags: return "Upgrade seller — upsize listing opportunity"
     if "School-stage lifecycle" in flags:                   return "School-stage mover — listing opportunity"
     if "Free and clear" in flags or "High-equity owner" in flags:
         return "Equity-rich seller — strong listing position"
