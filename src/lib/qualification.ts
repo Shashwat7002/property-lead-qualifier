@@ -368,6 +368,19 @@ function isLikelySingleFamily(propertyType: string): boolean {
 }
 
 
+function getLocalValueCeiling(county: string, city: string, zip: string): number {
+  const normalizedCity = city.toLowerCase().trim();
+  const normalizedZip = normalizeZip(zip);
+
+  if (normalizedCity === "milton") return 3000000;
+  if (normalizedCity === "alpharetta" || normalizedCity === "johns creek") return 2200000;
+  if (normalizedZip === "30005") return 2200000;
+  if (normalizedCity === "sandy springs") return 1800000;
+  if (county.toLowerCase().includes("forsyth")) return 1800000;
+  if (normalizedCity === "roswell") return 1600000;
+  return 1500000;
+}
+
 function classifyPropertyType(propertyType: string): PropertyTypeFit {
   const normalized = propertyType.toLowerCase();
 
@@ -730,14 +743,17 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   }
 
   if (marketValue !== null) {
+    const localValueCeiling = getLocalValueCeiling(county, propertyCity, propertyZip);
+
     if (marketValue < 200000) {
       apply(-8, "Value under $200,000 minimum threshold", "fit", "failure");
       scoreCap = Math.min(scoreCap, 39);
-    } else if (marketValue > 1000000) {
-      apply(-8, "Value above $1,000,000 maximum threshold", "fit", "failure");
-      scoreCap = Math.min(scoreCap, 39);
+    } else if (marketValue <= localValueCeiling) {
+      apply(4, "Within submarket value band", "fit", "pass");
+    } else if (ownershipYears !== null && ownershipYears >= 10 && equityRatio !== null && equityRatio >= 0.4) {
+      apply(3, "Above ceiling but high-equity long-tenure — high-GCI listing candidate", "motivation", "pass");
     } else {
-      apply(4, "Within $200K–$1M target value band", "fit", "pass");
+      apply(0, "Above submarket ceiling — verify listing motivation", "fit", "warning");
     }
 
     if (fairMarketValue === null && assessedValue !== null) {
@@ -857,13 +873,14 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   }
 
   if (yearBuilt !== null) {
-    if (yearBuilt >= 1995) {
-      apply(-8, "Built 1995 or later — outside year-built criterion", "fit", "failure");
-      scoreCap = Math.min(scoreCap, 39);
-    } else if (yearBuilt < 1985) {
+    if (yearBuilt < 1985) {
       apply(4, "Pre-1985 home with renovation upside", "fit", "pass", true);
-    } else {
+    } else if (yearBuilt < 1995) {
       apply(3, "Pre-1995 home", "fit", "pass", true);
+    } else if (yearBuilt < 2010) {
+      apply(0, "1995–2009 home — neutral age signal", "fit", "pass");
+    } else {
+      apply(-2, "Newer home (2010+) — lower renovation upside", "fit", "warning");
     }
   } else {
     addMissing("Missing year built");
@@ -1026,7 +1043,7 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     "Ownership transfer anomaly", "Premium school performance — North Fulton resale driver",
   ];
   const hasPositiveMotivationFlag = flags.some((f) => POSITIVE_MOTIVATION_FLAGS.includes(f));
-  if (!hasPositiveMotivationFlag && motivationRaw <= 2) {
+  if (!hasPositiveMotivationFlag && motivationRaw <= 5) {
     scoreCap = Math.min(scoreCap, 38);
     warnings.push("No seller motivation signals detected — capped below tier-C");
   }
