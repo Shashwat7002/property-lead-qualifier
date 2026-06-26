@@ -267,6 +267,9 @@ def _serialize_lead(lead: dict) -> dict:
         "passes":                   lead.get("passes", []),
         "warnings":                 lead.get("warnings", []),
         "failures":                 lead.get("failures", []),
+        "estimated_conversion_pct": lead.get("estimated_conversion_pct", ""),
+        "expected_gci_range":       lead.get("expected_gci_range", ""),
+        "data_quality_notes":       lead.get("data_quality_notes", []),
         # Enrichment
         "school_performance_score": lead.get("school_performance_score"),
         "fred_mortgage_rate":       lead.get("fred_mortgage_rate"),

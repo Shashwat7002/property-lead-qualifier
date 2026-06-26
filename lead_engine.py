@@ -63,7 +63,9 @@ class LeadEngine:
         city          = (prop.get("city") or "").lower().strip()
         prop_type     = (prop.get("property_type") or "").lower()
         owner_name    = (prop.get("owner_name") or "").upper()
-        years_owned   = int(prop.get("years_owned") or 0)
+        years_owned_raw  = prop.get("years_owned")
+        years_owned      = int(years_owned_raw or 0)
+        gsccca_connected = years_owned_raw is not None  # None = GSCCCA not queried or key absent
 
         # Flask demo stores full market values in 'assessed_value' (from FMLS ListPrice)
         market_value  = float(prop.get("assessed_value") or 0)
@@ -93,10 +95,11 @@ class LeadEngine:
         confidence_raw = 0
         exec_fit_used  = 0
         score_cap      = 100
-        flags          = []
-        passes         = []
-        warnings       = []
-        failures       = []
+        flags              = []
+        passes             = []
+        warnings           = []
+        failures           = []
+        data_quality_notes = []
 
         def apply(points, message, category, reason_type, cap_exec=False):
             nonlocal motivation_raw, fit_raw, confidence_raw, exec_fit_used
@@ -154,19 +157,20 @@ class LeadEngine:
             r"quit.?claim|estate|inherited|inheritance|divorce|sheriff|relocation|non.?arm|family transfer",
             transfer_type,
         ))
-        if years_owned < 3:
-            if is_life_event_transfer:
-                # Inherited / divorce / relocation transfers aren't speculative flips — soften penalty
-                apply(-4, "Short tenure — life-event transfer (override)", "motivation", "warning")
-                warnings.append("Recent transfer under 3 yr — likely estate/divorce/relocation, verify before outreach")
-            else:
-                apply(-18, "Recent sale under 3 years", "motivation", "failure")
-        elif years_owned >= 15:
-            apply(10, f"Owned {years_owned}+ years", "motivation", "flag")
-        elif years_owned >= 8:
-            apply(6, f"Owned {years_owned}+ years", "motivation", "pass")
-        elif years_owned >= 5:
-            apply(3, f"Owned {years_owned}+ years", "motivation", "pass")
+        if gsccca_connected:
+            if years_owned < 3:
+                if is_life_event_transfer:
+                    # Inherited / divorce / relocation transfers aren't speculative flips — soften penalty
+                    apply(-4, "Short tenure — life-event transfer (override)", "motivation", "warning")
+                    warnings.append("Recent transfer under 3 yr — likely estate/divorce/relocation, verify before outreach")
+                else:
+                    apply(-18, "Recent sale under 3 years", "motivation", "failure")
+            elif years_owned >= 15:
+                apply(10, f"Owned {years_owned}+ years", "motivation", "flag")
+            elif years_owned >= 8:
+                apply(6, f"Owned {years_owned}+ years", "motivation", "pass")
+            elif years_owned >= 5:
+                apply(3, f"Owned {years_owned}+ years", "motivation", "pass")
 
         # ── Market value ─────────────────────────────────────────────────────
         ceiling = SUBMARKET_CEILINGS.get(city, 1_800_000 if is_forsyth else 1_500_000)
@@ -250,8 +254,8 @@ class LeadEngine:
             ])
             apply(-6 if has_other else -12, "Verified owner-occupied homestead", "motivation", "failure")
             apply(3, "Homestead status verified", "confidence", "pass")
-            if mortgage_year and 2020 <= int(mortgage_year) <= 2022:
-                apply(-6, "Rate-lock cohort: 2020–22 mortgage on homestead", "motivation", "failure")
+            if mortgage_year and 2018 <= int(mortgage_year) <= 2022:
+                apply(-6, "Rate-lock cohort: 2018–22 mortgage — sub-4% rate creates move-up friction", "motivation", "failure")
 
         # ── Senior exemption ──────────────────────────────────────────────────
         if senior_exemption:
@@ -316,19 +320,21 @@ class LeadEngine:
         # ── Lifecycle signals (empty-nest, school-stage, upgrade seller) ─────
         # Sources: nurture-coach seller profiles — Downsizer, School-Stage,
         # and Upgrade Seller archetypes. Each maps to a distinct listing conversation.
-        if bedrooms >= 3 and years_owned >= 20:
-            apply(8, "Empty-nest probability", "motivation", "flag")
-        elif bedrooms >= 3 and years_owned >= 15:
-            apply(6, "Empty-nest probability", "motivation", "flag")
-        elif bedrooms >= 4 and years_owned >= 10:
-            apply(4, "School-stage lifecycle", "motivation", "flag")
-        elif bedrooms == 3 and 7 <= years_owned <= 14 and homestead:
-            # Upgrade Seller (nurture-coach): 3-bed starter home with equity buildup.
-            # Owner is living in the home, likely outgrowing it — wants to upsize.
-            # Most common move-up seller in the North Fulton market.
-            apply(6, "Upgrade seller — move-up listing candidate", "motivation", "flag")
-        elif years_owned >= 20:
-            apply(4, "Long-tenure lifecycle signal", "motivation", "pass")
+        # Guard: lifecycle signals require confirmed tenure data from GSCCCA.
+        if gsccca_connected:
+            if bedrooms >= 3 and years_owned >= 20:
+                apply(8, "Empty-nest probability", "motivation", "flag")
+            elif bedrooms >= 3 and years_owned >= 15:
+                apply(6, "Empty-nest probability", "motivation", "flag")
+            elif bedrooms >= 4 and years_owned >= 10:
+                apply(4, "School-stage lifecycle", "motivation", "flag")
+            elif bedrooms == 3 and 7 <= years_owned <= 14 and homestead:
+                # Upgrade Seller (nurture-coach): 3-bed starter home with equity buildup.
+                # Owner is living in the home, likely outgrowing it — wants to upsize.
+                # Most common move-up seller in the North Fulton market.
+                apply(6, "Upgrade seller — move-up listing candidate", "motivation", "flag")
+            elif years_owned >= 20:
+                apply(4, "Long-tenure lifecycle signal", "motivation", "pass")
 
         # ── Investor-magnet warning (individual buyer focus) ──────────────────
         # Properties that combine severe distress + vacancy + pre-1985 build are
@@ -440,6 +446,34 @@ class LeadEngine:
             elif ss < 65:
                 apply(-4, "Weaker school performance", "fit", "failure")
 
+        # ── Data completeness → confidence calibration ─────────────────────────
+        # Confidence answers "how much should we trust this lead's score?"
+        # Penalize when key enrichment sources are absent; reward confirmed data.
+        if gsccca_connected and years_owned > 0:
+            apply(3, "Tenure confirmed via GSCCCA", "confidence", "pass")
+        elif not gsccca_connected:
+            apply(-5, "GSCCCA unavailable — tenure and lifecycle signals unknown", "confidence", "failure")
+            data_quality_notes.append("GSCCCA not connected — years_owned unknown; lifecycle signals (empty-nest, upgrade seller) not scored")
+
+        if equity_ratio is not None or free_and_clear:
+            apply(2, "Equity position confirmed", "confidence", "pass")
+        else:
+            apply(-3, "Equity estimate unavailable", "confidence", "failure")
+            data_quality_notes.append("Equity data unavailable — financial motivation score relies on free-and-clear status only")
+
+        if bedrooms > 0:
+            apply(1, "Bedroom count confirmed", "confidence", "pass")
+        else:
+            data_quality_notes.append("Bedroom count missing — listing fit score may be understated")
+
+        if year_built > 0:
+            apply(1, "Year built confirmed", "confidence", "pass")
+        else:
+            data_quality_notes.append("Year built unknown — marketability signal not scored")
+
+        if is_oos:
+            data_quality_notes.append("Out-of-state owner — phone/email enrichment needed before outreach")
+
         # ── Guards ────────────────────────────────────────────────────────────
         has_positive = any(f in POSITIVE_MOTIVATION_FLAGS for f in flags)
         if not has_positive and motivation_raw <= 5:
@@ -478,7 +512,10 @@ class LeadEngine:
             "flags":            list(dict.fromkeys(flags)),
             "passes":           list(dict.fromkeys(passes)),
             "warnings":         list(dict.fromkeys(warnings)),
-            "failures":         list(dict.fromkeys(failures)),
+            "failures":                list(dict.fromkeys(failures)),
+            "estimated_conversion_pct": _conversion_pct(tier),
+            "expected_gci_range":       _gci_range(tier),
+            "data_quality_notes":       data_quality_notes,
         }
 
 
@@ -536,6 +573,26 @@ def _strategy(flags: list, failures: list, tier: str) -> str:
         return "Premium school zone — fast-sale listing"
     if "Senior exemption lifecycle signal" in flags:        return "Senior downsizer — listing opportunity"
 
-    if tier == "HOT":  return "Priority outreach"
-    if tier == "WARM": return "Secondary outreach"
-    return "Nurture / manual review"
+    if tier == "HOT":  return "Priority outreach — call within 24 hours"
+    if tier == "WARM": return "Warm outreach — schedule call this week"
+    return "Nurture — monitor for motivation signals"
+
+
+def _conversion_pct(tier: str) -> str:
+    """Estimated listing-agreement conversion rate by tier (North Fulton / Forsyth baseline)."""
+    return {
+        "HOT":  "15–25%",
+        "WARM": "8–15%",
+        "COOL": "3–8%",
+        "PASS": "<1%",
+    }.get(tier, "unknown")
+
+
+def _gci_range(tier: str) -> str:
+    """Expected GCI per lead worked, based on ~$875K avg list price × 2.5% listing commission."""
+    return {
+        "HOT":  "$3,300–$5,500 expected GCI",
+        "WARM": "$1,750–$3,300 expected GCI",
+        "COOL": "$660–$1,750 expected GCI",
+        "PASS": "$0 — below outreach threshold",
+    }.get(tier, "")
