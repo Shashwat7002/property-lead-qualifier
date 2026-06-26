@@ -3,17 +3,18 @@ import { LeadTier, PropertyRecord, QualificationResult, QualificationStatus } fr
 const CURRENT_YEAR = new Date().getFullYear();
 const DEFAULT_PROPERTY_STATE = "GA";
 const MISSING_DATA_PENALTY_LIMIT = -12;
-const EXECUTION_FIT_BONUS_LIMIT = 10;
+const EXECUTION_FIT_BONUS_LIMIT = 16;
 
 const NORTH_FULTON_CITIES = [
   "alpharetta",
   "johns creek",
   "milton",
   "roswell",
+  "sandy springs",
 ];
 
 const NORTH_FULTON_CITY_SET = new Set(NORTH_FULTON_CITIES);
-const SOUTH_FORSYTH_ZIPS = new Set(["30040", "30041", "30005", "30024"]);
+const SOUTH_FORSYTH_ZIPS = new Set(["30040", "30041", "30024"]);
 const SOUTH_FORSYTH_FALLBACK_CITIES = new Set(["cumming", "alpharetta", "suwanee"]);
 
 const CORPORATE_OWNER_TERMS = [
@@ -535,11 +536,11 @@ function chooseStrategy(flags: string[], failures: string[], tier: LeadTier): st
   }
 
   if (flags.includes("Verified tax or foreclosure distress")) {
-    return "Verified distress";
+    return "Motivated seller — timeline pressure";
   }
 
   if (flags.includes("Small landlord") || flags.includes("Mid-size landlord")) {
-    return "Landlord fatigue";
+    return "Portfolio exit — listing conversion";
   }
 
   if (flags.includes("Out-of-state absentee") || flags.includes("In-state absentee")) {
@@ -547,15 +548,15 @@ function chooseStrategy(flags: string[], failures: string[], tier: LeadTier): st
   }
 
   if (flags.includes("Empty-nest probability")) {
-    return "Lifecycle / downsizing";
+    return "Empty-nest downsizer — listing opportunity";
   }
 
   if (flags.includes("Free and clear") || flags.includes("High-equity owner")) {
-    return "Equity-rich owner";
+    return "Equity-rich seller — strong listing position";
   }
 
   if (flags.includes("Premium school performance")) {
-    return "Premium school-zone resale";
+    return "Premium school zone — fast-sale listing";
   }
 
   return tier === "A" ? "Priority outreach" : tier === "B" ? "Secondary outreach" : "Nurture / manual review";
@@ -754,9 +755,9 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
     } else if (marketValue <= localValueCeiling) {
       apply(4, "Submarket value band fit", "fit", "pass");
     } else if (ownershipYears !== null && ownershipYears >= 10 && equityRatio !== null && equityRatio >= 0.4) {
-      apply(3, "Luxury high-equity owner still worth outreach", "motivation", "pass");
+      apply(3, "Luxury high-equity owner — high-GCI listing candidate", "motivation", "pass");
     } else {
-      apply(-2, "Luxury value needs stronger motivation", "fit", "warning");
+      apply(0, "High-value asset above submarket ceiling — verify listing motivation", "fit", "warning");
     }
 
     if (fairMarketValue === null && assessedValue !== null) {
@@ -796,7 +797,7 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (mailingState) {
     if (propertyState !== mailingState) {
-      apply(10, "Out-of-state absentee", "motivation", "flag");
+      apply(14, "Out-of-state absentee", "motivation", "flag");
     } else if (propertyAddress && mailingAddress && !sameAddressOwner) {
       apply(6, "In-state absentee", "motivation", "flag");
     } else if (ownershipYears !== null && ownershipYears >= 15) {
@@ -814,8 +815,18 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (hasKnownSignal(homesteadExemption)) {
     if (isTruthySignal(homesteadExemption)) {
-      apply(-6, "Verified owner-occupied homestead", "motivation", "failure");
+      const hasOtherMotivation = flags.some((f) =>
+        ["Probate, trust, or estate signal", "Verified tax or foreclosure distress",
+         "Property-level vacancy indicator", "Out-of-state absentee", "In-state absentee",
+         "Senior exemption lifecycle signal"].includes(f),
+      );
+      apply(hasOtherMotivation ? -6 : -12, "Verified owner-occupied homestead", "motivation", "failure");
       apply(3, "Homestead status verified", "confidence", "pass");
+      // Rate-lock cohort: 2020-22 vintage homestead owners face structural triple lock-in
+      // (sub-4% mortgage + school zone + appreciation anchoring) — North Fulton specific
+      if (inferredMortgageAge !== null && mortgageYear !== null && mortgageYear >= 2020 && mortgageYear <= 2022) {
+        apply(-6, "Rate-lock cohort: 2020–22 mortgage on homestead", "motivation", "failure");
+      }
     } else if (isFalseySignal(homesteadExemption) && likelySingleFamily) {
       apply(7, "No homestead on likely SFR", "motivation", "flag");
       apply(3, "Homestead status verified", "confidence", "pass");
@@ -919,6 +930,10 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
   if (schoolPerformanceScore !== null) {
     if (schoolPerformanceScore >= 92) {
       apply(3, "Premium school performance", "fit", "flag", true);
+      // In North Fulton/South Forsyth, GOSA ≥92 school zones command $150K–$200K buyer premiums
+      // (Denmark, Milton, Northview, Cambridge HS zones). Premium buyer demand is a listing
+      // motivation driver — faster sales and higher prices — not just a fit signal.
+      apply(4, "Premium school performance — North Fulton resale driver", "motivation", "flag");
     } else if (schoolPerformanceScore >= 85) {
       apply(2, "Strong school performance", "fit", "pass", true);
     } else if (schoolPerformanceScore >= 75) {
@@ -1020,6 +1035,22 @@ function qualifyRecord(record: PropertyRecord, index: number): QualificationResu
 
   if (/^(yes|true|1)$/i.test(osmMajorRoadNearby)) {
     apply(-3, "Possible major-road noise exposure", "fit", "failure");
+  }
+
+  // Low-motivation guard: if no positive seller signal was detected at all,
+  // cap below tier-C (40) so fit-only leads don't inflate the actionable pool.
+  const POSITIVE_MOTIVATION_FLAGS = [
+    "Out-of-state absentee", "In-state absentee", "Probate, trust, or estate signal",
+    "Verified tax or foreclosure distress", "Property-level vacancy indicator",
+    "Empty-nest probability", "Senior exemption lifecycle signal",
+    "No homestead on likely SFR", "Free and clear", "High-equity owner",
+    "Owner-occupied with long tenure", "Small landlord", "Mid-size landlord",
+    "Ownership transfer anomaly", "Premium school performance — North Fulton resale driver",
+  ];
+  const hasPositiveMotivationFlag = flags.some((f) => POSITIVE_MOTIVATION_FLAGS.includes(f));
+  if (!hasPositiveMotivationFlag && motivationRaw <= 2) {
+    scoreCap = Math.min(scoreCap, 38);
+    warnings.push("No seller motivation signals detected — capped below tier-C");
   }
 
   const motivationScore = clampScore(30 + motivationRaw * 2.4);
