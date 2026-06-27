@@ -10,13 +10,16 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, send_file
 
-import config as cfg
+from settings import settings as cfg
 from enrichment import Enricher
 from fmls_client import FMLSClient
 from lead_engine import LeadEngine
+from source_modes import SourceMode, ENGINE_GOAL
+import db
 
-app    = Flask(__name__)
-engine = LeadEngine()
+app = Flask(__name__)
+# NOTE: the scoring engine is instantiated PER REQUEST in /api/scan with the correct
+# listing_goal for the chosen SourceMode — there is no shared global engine.
 
 
 def _make_enricher() -> Enricher:
@@ -44,6 +47,10 @@ def scan():
     if not counties:
         return jsonify({"success": False, "error": "Select at least one county."}), 400
 
+    # P0-01: scan mode drives both the data source population and the engine goal.
+    mode = SourceMode.parse(data.get("mode", "seller_prospecting"))
+    engine = LeadEngine(listing_goal=ENGINE_GOAL[mode])
+
     client   = FMLSClient(
         api_key  = cfg.FMLS_API_KEY,
         username = cfg.FMLS_USERNAME,
@@ -59,42 +66,72 @@ def scan():
         total_scanned = 0
 
         for county in counties:
-            props = client.get_properties(county)
+            props = client.get_properties(county, mode=mode.value)
             total_scanned += len(props)
             all_props.extend(props)
+
+        # P0-01: if seller-prospecting found nothing off-market (e.g. only Active/Coming
+        # Soon FMLS is configured), warn rather than silently presenting holds as leads.
+        warning = None
+        if mode == SourceMode.SELLER_PROSPECTING and not cfg.DEMO_MODE and total_scanned == 0:
+            warning = ("No off-market seller-prospect source is configured. Active/Coming "
+                       "Soon MLS records are available only in Market Intelligence mode.")
 
         # Enrich in parallel (Census geocoding + OSM + school lookup)
         enricher.enrich_batch(all_props)
 
-        # Score
-        raw_leads = []
+        # P0-02: score into separate buckets so COMPLIANCE_HOLD records never sit in the
+        # main seller-lead queue or default export.
+        lead_rows, review_rows, compliance_rows, market_intel_rows = [], [], [], []
+        excluded_count = 0
         for p in all_props:
             scored = engine.score_lead(p)
-            if scored["tier"] != "PASS":
-                raw_leads.append(scored)
+            tier = scored.get("tier")
+            if tier in ("HOT", "WARM", "COOL"):
+                lead_rows.append(scored)
+            elif tier == "REVIEW":
+                review_rows.append(scored)
+            elif tier == "COMPLIANCE_HOLD":
+                compliance_rows.append(scored)
+            elif tier == "PASS":
+                excluded_count += 1
+            else:
+                scored.setdefault("data_quality_notes", []).append(f"Unknown tier {tier}; routed to review")
+                review_rows.append(scored)
 
-        # Rank by operational_priority (qualification score adjusted for contactability),
-        # falling back to raw score. Contactability is neutral when contact data is
-        # absent, so demo ordering is unchanged.
-        raw_leads.sort(key=lambda x: (x.get("operational_priority") or x["score"]), reverse=True)
-        leads = [_serialize_lead(l) for l in raw_leads]
+        # Rank each bucket by operational_priority (qualification score adjusted for
+        # contactability), falling back to raw score.
+        for bucket in (lead_rows, review_rows, compliance_rows, market_intel_rows):
+            bucket.sort(key=lambda x: (x.get("operational_priority") or x.get("score") or 0), reverse=True)
 
         stats = {
             "total_scanned": total_scanned,
-            "hot":        sum(1 for l in leads if l["tier"] == "HOT"),
-            "warm":       sum(1 for l in leads if l["tier"] == "WARM"),
-            "cool":       sum(1 for l in leads if l["tier"] == "COOL"),
-            "review":     sum(1 for l in leads if l["tier"] == "REVIEW"),
-            "compliance": sum(1 for l in leads if l["tier"] == "COMPLIANCE_HOLD"),
+            "hot":        sum(1 for l in lead_rows if l["tier"] == "HOT"),
+            "warm":       sum(1 for l in lead_rows if l["tier"] == "WARM"),
+            "cool":       sum(1 for l in lead_rows if l["tier"] == "COOL"),
+            "review":     len(review_rows),
+            "compliance": len(compliance_rows),
+            "pass":       excluded_count,
         }
 
+        # P2-11: persist scored leads for future outcome calibration (best-effort).
+        try:
+            db.record_scores(lead_rows + review_rows, source_mode=mode.value)
+        except Exception:
+            pass
+
         return jsonify({
-            "success":      True,
-            "demo_mode":    cfg.DEMO_MODE,
-            "enrichment":   enricher.status(),
-            "stats":        stats,
-            "leads":        leads,
-            "scanned_at":   datetime.now().strftime("%b %d, %Y at %I:%M %p"),
+            "success":         True,
+            "mode":            mode.value,
+            "demo_mode":       cfg.DEMO_MODE,
+            "warning":         warning,
+            "enrichment":      enricher.status(),
+            "stats":           stats,
+            "leads":           [_serialize_lead(l) for l in lead_rows],
+            "review_leads":    [_serialize_lead(l) for l in review_rows],
+            "compliance_holds":[_serialize_lead(l) for l in compliance_rows],
+            "market_intel":    [_serialize_lead(l) for l in market_intel_rows],
+            "scanned_at":      datetime.now().strftime("%b %d, %Y at %I:%M %p"),
         })
 
     except Exception as exc:
@@ -105,14 +142,26 @@ def scan():
 
 @app.route("/api/export", methods=["POST"])
 def export_csv():
-    leads = (request.json or {}).get("leads", [])
+    body = request.json or {}
+    leads = body.get("leads", [])
+    # P0-02: default export must exclude compliance holds. The compliance-hold export
+    # is a separate, explicitly-requested bucket (bucket="compliance_holds").
+    bucket = body.get("bucket", "leads")
+    if bucket != "compliance_holds":
+        leads = [l for l in leads if l.get("tier") != "COMPLIANCE_HOLD"]
     if not leads:
         return jsonify({"error": "No leads to export."}), 400
 
     fieldnames = [
-        "Rank", "Score", "OperationalPriority", "Tier", "PriorityBand", "Strategy",
+        "Rank", "Score", "OperationalPriority", "BusinessPriorityProxy", "Tier",
+        "PriorityBand", "Strategy",
         "MotivationScore", "FitScore", "ConfidenceScore", "ContactabilityScore",
-        "RelativeConversion", "OpportunitySize",
+        "RelativeConversion", "OpportunitySize", "ExpectedGCI",
+        "SellerOutreachAllowed", "OutreachPolicy", "AllowedChannels", "BlockedChannels",
+        "ContactRiskNotes",
+        "MicroMarketTier", "MicroMarketLiquidityScore", "PriceBandFitScore",
+        "SchoolSource", "SchoolBoundaryConfidence",
+        "GSCCCAMatchConfidence", "SourceMode", "SourceSystem",
         "Address", "City", "County", "ZipCode", "State",
         "PropertyType", "YearBuilt", "Bedrooms", "AssessedValue",
         "OwnerName", "OwnerMailingAddress", "OwnerCity", "OwnerState",
@@ -135,6 +184,7 @@ def export_csv():
             "Rank":                 rank,
             "Score":                lead.get("score", ""),
             "OperationalPriority":  lead.get("operational_priority", ""),
+            "BusinessPriorityProxy": lead.get("business_priority_score", ""),
             "Tier":                 lead.get("tier", ""),
             "PriorityBand":         lead.get("priority_band", ""),
             "Strategy":             lead.get("strategy", ""),
@@ -144,6 +194,20 @@ def export_csv():
             "ContactabilityScore":  lead.get("contactability_score", ""),
             "RelativeConversion":   lead.get("estimated_conversion_pct", ""),
             "OpportunitySize":      lead.get("expected_gci_range", ""),
+            "ExpectedGCI":          lead.get("expected_gci", ""),
+            "SellerOutreachAllowed": "Yes" if lead.get("seller_outreach_allowed") else "No",
+            "OutreachPolicy":       lead.get("outreach_policy", ""),
+            "AllowedChannels":      " | ".join(lead.get("allowed_channels", [])),
+            "BlockedChannels":      " | ".join(lead.get("blocked_channels", [])),
+            "ContactRiskNotes":     " | ".join(lead.get("contact_risk_notes", [])),
+            "MicroMarketTier":      lead.get("micro_market_tier", ""),
+            "MicroMarketLiquidityScore": lead.get("micro_market_liquidity_score", ""),
+            "PriceBandFitScore":    lead.get("price_band_fit_score", ""),
+            "SchoolSource":         lead.get("school_score_source", ""),
+            "SchoolBoundaryConfidence": lead.get("school_boundary_confidence", ""),
+            "GSCCCAMatchConfidence": lead.get("gsccca_match_confidence", ""),
+            "SourceMode":           lead.get("source_mode", ""),
+            "SourceSystem":         lead.get("source_system", ""),
             "Address":              lead.get("address", ""),
             "City":                 lead.get("city", ""),
             "County":               lead.get("county", ""),
@@ -208,39 +272,26 @@ def api_config():
             "gsccca_password_set":  _is_set(getattr(cfg, "GSCCCA_PASSWORD", "")),
         })
 
-    data      = request.json or {}
-    cfg_path  = os.path.join(os.path.dirname(__file__), "config.py")
+    # P0-03: secrets are persisted to the gitignored local_settings.json (JSON, never
+    # executable Python). Blank secret fields mean "leave unchanged" — they are simply
+    # omitted from the update so the stored value is preserved.
+    data = request.json or {}
 
-    # Blank secret fields mean "leave unchanged" (the GET no longer pre-fills them),
-    # so fall back to the currently stored value instead of wiping it.
-    def _keep(submitted, current):
-        s = (submitted or "").strip()
-        return s if s else (current or "")
+    def _submitted(key):
+        v = (data.get(key) or "").strip()
+        return v or None    # None → save_local skips it (keeps existing value)
 
-    username         = data.get("username",          "").strip()
-    demo_mode        = bool(data.get("demo_mode",    True))
-    gsccca_username  = data.get("gsccca_username",  "").strip()
-
-    api_key          = _keep(data.get("api_key"),         cfg.FMLS_API_KEY)
-    password         = _keep(data.get("password"),        getattr(cfg, "FMLS_PASSWORD", ""))
-    fred_api_key     = _keep(data.get("fred_api_key"),    getattr(cfg, "FRED_API_KEY", ""))
-    census_api_key   = _keep(data.get("census_api_key"),  getattr(cfg, "CENSUS_API_KEY", ""))
-    gsccca_password  = _keep(data.get("gsccca_password"), getattr(cfg, "GSCCCA_PASSWORD", ""))
-
-    with open(cfg_path, "w") as f:
-        f.write("# Sprint Lead Generation — Configuration\n")
-        f.write("# (auto-generated — edit via API Settings panel)\n\n")
-        f.write(f'FMLS_API_KEY  = "{api_key}"\n')
-        f.write(f'FMLS_USERNAME = "{username}"\n')
-        f.write(f'FMLS_PASSWORD = "{password}"\n')
-        f.write(f'DEMO_MODE     = {demo_mode}\n\n')
-        f.write(f'FRED_API_KEY   = "{fred_api_key}"\n')
-        f.write(f'CENSUS_API_KEY = "{census_api_key}"\n\n')
-        f.write(f'GSCCCA_USERNAME = "{gsccca_username}"\n')
-        f.write(f'GSCCCA_PASSWORD = "{gsccca_password}"\n')
-
-    import importlib
-    importlib.reload(cfg)
+    updates = {
+        "FMLS_USERNAME":   data.get("username", "").strip(),
+        "DEMO_MODE":       bool(data.get("demo_mode", True)),
+        "GSCCCA_USERNAME": data.get("gsccca_username", "").strip(),
+        "FMLS_API_KEY":    _submitted("api_key"),
+        "FMLS_PASSWORD":   _submitted("password"),
+        "FRED_API_KEY":    _submitted("fred_api_key"),
+        "CENSUS_API_KEY":  _submitted("census_api_key"),
+        "GSCCCA_PASSWORD": _submitted("gsccca_password"),
+    }
+    cfg.save_local(updates)
 
     return jsonify({"success": True, "demo_mode": cfg.DEMO_MODE})
 
@@ -250,6 +301,30 @@ def api_config():
 @app.route("/api/enrichment_status")
 def enrichment_status():
     return jsonify(_make_enricher().status())
+
+
+# ── Outcome tracking / calibration (P2-11) ─────────────────────────────────────
+
+@app.route("/api/outreach_event", methods=["POST"])
+def outreach_event():
+    d = request.json or {}
+    key = (d.get("lead_key") or "").strip()
+    event_type = (d.get("event_type") or "").strip()
+    if not key or not event_type:
+        return jsonify({"success": False, "error": "lead_key and event_type required"}), 400
+    rid = db.record_event(key, event_type, d.get("channel", ""),
+                          d.get("outcome", ""), d.get("notes", ""))
+    return jsonify({"success": True, "event_id": rid})
+
+
+@app.route("/api/lead_history/<lead_key>")
+def lead_history(lead_key):
+    return jsonify(db.lead_history(lead_key))
+
+
+@app.route("/api/calibration_summary")
+def calibration_summary():
+    return jsonify({"summary": db.calibration_summary()})
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -288,17 +363,36 @@ def _serialize_lead(lead: dict) -> dict:
         "confidence_score":         lead.get("confidence_score", 0),
         "contactability_score":     lead.get("contactability_score", 50),
         "operational_priority":     lead.get("operational_priority", lead.get("score", 0)),
+        "business_priority_score":  lead.get("business_priority_score"),
         "strategy":                 lead.get("strategy", ""),
-        # Signals
-        "flags":                    lead.get("flags", []),
-        "passes":                   lead.get("passes", []),
-        "warnings":                 lead.get("warnings", []),
+        # Signals (public-safe variants preferred by UI/CSV)
+        "flags":                    lead.get("public_flags", lead.get("flags", [])),
+        "passes":                   lead.get("public_passes", lead.get("passes", [])),
+        "warnings":                 lead.get("public_warnings", lead.get("warnings", [])),
         "failures":                 lead.get("failures", []),
         "priority_band":            lead.get("priority_band", ""),
         "estimated_conversion_pct": lead.get("estimated_conversion_pct", ""),
         "expected_gci_range":       lead.get("expected_gci_range", ""),
+        "expected_gci":             lead.get("expected_gci"),
         "data_quality_notes":       lead.get("data_quality_notes", []),
         "market_context":           lead.get("market_context", []),
+        # Outreach permissions (P0-05)
+        "seller_outreach_allowed":  lead.get("seller_outreach_allowed"),
+        "outreach_policy":          lead.get("outreach_policy", ""),
+        "allowed_channels":         lead.get("allowed_channels", []),
+        "blocked_channels":         lead.get("blocked_channels", []),
+        "contact_risk_notes":       lead.get("contact_risk_notes", []),
+        # Micro-market (P1-10) + source labels
+        "micro_market_tier":        lead.get("micro_market_tier", ""),
+        "micro_market_liquidity_score": lead.get("micro_market_liquidity_score"),
+        "micro_market_label":       lead.get("micro_market_label", ""),
+        "price_band_fit_score":     lead.get("price_band_fit_score"),
+        "source_mode":              lead.get("source_mode", ""),
+        "source_system":            lead.get("source_system", ""),
+        # School / GSCCCA provenance (P1-07 / P1-08)
+        "school_score_source":      lead.get("school_score_source", ""),
+        "school_boundary_confidence": lead.get("school_boundary_confidence"),
+        "gsccca_match_confidence":  lead.get("gsccca_match_confidence"),
         # Debug / calibration (raw components)
         "motivation_raw":           lead.get("motivation_raw"),
         "fit_raw":                  lead.get("fit_raw"),

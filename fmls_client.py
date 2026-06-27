@@ -101,9 +101,21 @@ class FMLSClient:
 
     # ── Public ───────────────────────────────────────────────────────────────
 
-    def get_properties(self, county: str) -> list:
-        import config
-        return self._demo_data(county) if config.DEMO_MODE else self._live_data(county)
+    def get_properties(self, county: str, mode: str = "market_intelligence") -> list:
+        """Fetch records for a county in the given SourceMode.
+
+        seller_prospecting   → off-market owners (NOT Active/Coming Soon).
+        market_intelligence  → Active/Coming Soon MLS inventory (comps/intel).
+        buyer_opportunity    → Active/Coming Soon for buyer-side ranking.
+        """
+        from settings import settings as _cfg
+        if _cfg.DEMO_MODE:
+            return self._demo_data(county, mode=mode)
+        if mode in ("market_intelligence", "buyer_opportunity"):
+            return self._live_market_inventory(county)
+        if mode == "seller_prospecting":
+            return self._live_seller_prospects(county)
+        raise ValueError(f"Unsupported FMLS source mode: {mode}")
 
     # ── Live API ─────────────────────────────────────────────────────────────
 
@@ -119,7 +131,9 @@ class FMLSClient:
     }
     _DEFAULT_PRICE_CEILING = 2_500_000
 
-    def _live_data(self, county: str) -> list:
+    def _live_market_inventory(self, county: str) -> list:
+        """Active / Coming Soon MLS inventory — market intelligence & buyer-side use.
+        These are NOT seller-prospecting records (the owners are represented)."""
         token   = self._get_token()
         headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
 
@@ -127,7 +141,7 @@ class FMLSClient:
 
         # Restrict the Fulton query to the five North Fulton target cities so we
         # don't scan (and later cap) the entire county. Forsyth stays county-wide.
-        import config as _cfg
+        from settings import settings as _cfg
         override_ceiling = getattr(_cfg, "FMLS_PRICE_CEILING", None)
         if county == 'North Fulton':
             ceiling = override_ceiling or max(self._CITY_PRICE_CEILING.values())
@@ -163,9 +177,64 @@ class FMLSClient:
             url = data.get('@odata.nextLink')
 
         self.last_count = len(props)
-        return [self._normalize(p, county) for p in props]
+        return [self._normalize(p, county, mode="market_intelligence") for p in props]
 
-    def _normalize(self, raw: dict, county: str) -> dict:
+    # FMLS RESO status vocabulary for non-active seller-prospect records. Confirm the
+    # exact strings your FMLS feed uses before relying on this in production.
+    _SELLER_PROSPECT_STATUSES = ("Expired", "Withdrawn", "Canceled", "Cancelled")
+
+    def _live_seller_prospects(self, county: str) -> list:
+        """Off-market seller prospects from FMLS (expired / withdrawn / canceled only).
+
+        This is the MINIMAL acceptable seller source per the execution ticket. The
+        production-preferred path is a dedicated off-market layer (county assessor,
+        deed, equity, contact) — see the `sources/` adapters. If no such source is
+        configured, a real install should surface the warning raised by app.py rather
+        than fall back to Active/Coming Soon.
+        """
+        token   = self._get_token()
+        headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+        county_code = 'Fulton' if county == 'North Fulton' else county
+
+        from settings import settings as _cfg
+        override_ceiling = getattr(_cfg, "FMLS_PRICE_CEILING", None)
+        if county == 'North Fulton':
+            ceiling = override_ceiling or max(self._CITY_PRICE_CEILING.values())
+            city_clause = " or ".join(f"City eq '{c}'" for c in self._FULTON_CITIES)
+            geo_clause = f"CountyOrParish eq 'Fulton' and ({city_clause})"
+        else:
+            ceiling = override_ceiling or self._DEFAULT_PRICE_CEILING
+            geo_clause = f"CountyOrParish eq '{county_code}'"
+
+        status_clause = "(" + " or ".join(
+            f"StandardStatus eq '{s}'" for s in self._SELLER_PROSPECT_STATUSES
+        ) + ")"
+        odata_filter = (
+            f"{geo_clause} and {status_clause} and "
+            f"ListPrice ge 200000 and ListPrice le {int(ceiling)}"
+        )
+        select = ','.join([
+            'ListingId','ListPrice','StreetNumber','StreetName','StreetSuffix',
+            'City','PostalCode','CountyOrParish','PropertyType','PropertySubType',
+            'YearBuilt','ListingContractDate','OwnerName','TaxAnnualAmount',
+            'BedroomsTotal','StandardStatus',
+        ])
+        url = (f"{self.BASE_URL}/Property"
+               f"?$filter={odata_filter}&$select={select}&$top=500&$count=true")
+        props = []
+        while url:
+            r = requests.get(url, headers=headers, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            props.extend(data.get('value', []))
+            url = data.get('@odata.nextLink')
+
+        self.last_count = len(props)
+        return [self._normalize(p, county, mode="seller_prospecting") for p in props]
+
+    def _normalize(self, raw: dict, county: str, mode: str = "market_intelligence") -> dict:
+        status = raw.get('StandardStatus', '')
+        is_listed = status.lower() in ("active", "coming soon")
         addr = f"{raw.get('StreetNumber','')} {raw.get('StreetName','')} {raw.get('StreetSuffix','')}".strip()
         return {
             'listing_id':              raw.get('ListingId', ''),
@@ -205,6 +274,12 @@ class FMLSClient:
             'transfer_type':           '',
             'phone':                   '',
             'email':                   '',
+            # ── Source labels (P0-01) ──────────────────────────────────────────
+            'source_system':           'fmls',
+            'source_mode':             mode,
+            'seller_outreach_allowed': not is_listed,
+            'compliance_hold_reason':  ('Active/Coming Soon FMLS listing — already represented'
+                                        if is_listed else None),
         }
 
     def _get_token(self) -> str:
@@ -222,7 +297,7 @@ class FMLSClient:
 
     # ── Demo data ─────────────────────────────────────────────────────────────
 
-    def _demo_data(self, county: str) -> list:
+    def _demo_data(self, county: str, mode: str = "market_intelligence") -> list:
         seed = 42 if county == 'Forsyth' else 73
         rng  = random.Random(seed)
 
@@ -237,7 +312,7 @@ class FMLSClient:
             profiles.append('owner_occ')
         rng.shuffle(profiles)
 
-        result = [self._gen(rng, county, cities, zips, p, i)
+        result = [self._gen(rng, county, cities, zips, p, i, mode)
                   for i, p in enumerate(profiles)]
         self.last_count = len(result)
         return result
@@ -254,14 +329,34 @@ class FMLSClient:
             return round(rng.uniform(82, 95), 1)  # Denmark/South Forsyth HS zone
         return round(rng.uniform(70, 90), 1)
 
-    def _gen(self, rng, county, cities, zips, profile, idx):
+    def _gen(self, rng, county, cities, zips, profile, idx, mode="market_intelligence"):
         city  = rng.choice(cities)
         zip_  = rng.choice(zips)
         addr  = f"{rng.randint(100, 9999)} {rng.choice(self._STREETS)}"
         value = rng.randint(250, 990) * 1000 + rng.choice([0, 500, 900, 0])
-        yr    = rng.randint(1968, 2012)
+        # P2-18: skew toward the target retail-buyer band (2005–2026) instead of
+        # topping out at 2012, so demos reflect the real North Fulton / S. Forsyth pool.
+        yr    = rng.choices(
+            population=[rng.randint(2005, 2020), rng.randint(2021, 2026),
+                        rng.randint(1995, 2004), rng.randint(1985, 1994),
+                        rng.randint(1968, 1984)],
+            weights=[0.40, 0.15, 0.22, 0.13, 0.10],
+        )[0]
         prop_type = rng.choice(self._PROP_TYPES)
         beds  = rng.randint(2, 3) if prop_type in ('Townhouse', 'Condo') else rng.randint(3, 5)
+
+        # P0-01 / P2-18: listing_status by mode. Market mode shows real MLS inventory
+        # (some Active/Coming Soon → COMPLIANCE_HOLD in seller scoring). Seller mode
+        # produces off-market records only, so no compliance holds appear as leads.
+        if mode in ("market_intelligence", "buyer_opportunity"):
+            demo_status = rng.choices(['Active', 'Coming Soon', 'Off Market'],
+                                      weights=[0.45, 0.15, 0.40])[0]
+        else:
+            # Seller mode is mostly off-market, but a small slice is already listed —
+            # these must be caught as COMPLIANCE_HOLD (the Art. 16 safety net), so the
+            # demo shows the hold queue working rather than presenting them as leads.
+            demo_status = rng.choices(['Off Market', 'Active', 'Coming Soon'],
+                                      weights=[0.88, 0.08, 0.04])[0]
 
         fn = rng.choice(self._FIRST)
         ln = rng.choice(self._LAST)
@@ -297,6 +392,12 @@ class FMLSClient:
             'transfer_type':           '',
             'phone':                   '',
             'email':                   '',
+            'listing_status':          demo_status,
+            'source_system':           'demo',
+            'source_mode':             mode,
+            'seller_outreach_allowed': demo_status not in ('Active', 'Coming Soon'),
+            'compliance_hold_reason':  ('Active/Coming Soon listing — already represented'
+                                        if demo_status in ('Active', 'Coming Soon') else None),
         }
 
         if profile == 'hot_primary':

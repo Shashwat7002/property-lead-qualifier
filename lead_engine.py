@@ -4,9 +4,9 @@ Sprint Lead Qualification Engine v2
 Multi-dimensional weighted scoring for North Fulton / Forsyth County listing leads.
 Target: individual homebuyers (families, move-up, downsizers) — NOT investors/flippers.
 
-Score formula
+Score formula (canonical copy lives in scoring_schema.py)
   motivationScore  = 100 / (1 + e^(-0.076·(motivationRaw − 11.1)))   ← logistic
-  fitScore         = clamp(45 + fitRaw × 2.1,  0, 100)
+  fitScore         = 100 / (1 + e^(-0.11·(fitRaw − 20)))             ← logistic (no saturation)
   confidenceScore  = clamp(72 + confidenceRaw × 4, 0, 100)
   blended          = motivationScore×0.6 + fitScore×0.25 + confidenceScore×0.15
 
@@ -59,6 +59,10 @@ listing outcomes (mailed→contacted→appointment→signed). Recalibrate at ≥
 
 import math
 import re
+
+from scoring_schema import public_label, public_strategy
+from market_config import micro_market_for, price_band_fit
+from schemas import normalize_lead_input
 
 CURRENT_YEAR = 2026
 EXEC_FIT_LIMIT = 16  # Cap on "execution fit" bonus signals (school zone, amenities, etc.)
@@ -171,6 +175,8 @@ class LeadEngine:
         self.listing_goal = listing_goal
 
     def score_lead(self, prop: dict) -> dict:
+        # P2-15: normalize first so UNKNOWN stays None (never silently False/0).
+        prop = normalize_lead_input(prop)
         result = dict(prop)
 
         # ── Parse inputs ─────────────────────────────────────────────────────
@@ -299,6 +305,16 @@ class LeadEngine:
             r"non.?arm|family transfer|trust transfer|gift|deed of gift",
             transfer_type,
         ))
+        # P1-08: GSCCCA match quality. A confident match adds confidence; an ambiguous /
+        # low-confidence match is NOT treated as confirmed tenure (warning + penalty).
+        gsccca_warning = prop.get("gsccca_warning")
+        gsccca_match_conf = float(prop.get("gsccca_match_confidence") or 0)
+        if prop.get("gsccca_verified") and gsccca_match_conf >= 0.80:
+            apply(3, "Tenure confirmed via GSCCCA", "confidence", "pass")
+        elif gsccca_warning:
+            apply(-4, "GSCCCA match uncertain", "confidence", "failure")
+            data_quality_notes.append(gsccca_warning)
+
         if gsccca_connected:
             if years_owned < 3:
                 if is_life_event_transfer:
@@ -319,6 +335,9 @@ class LeadEngine:
         # positive value below threshold is a true business-rule exclusion; an
         # unknown value lowers confidence and requires AVM/assessment enrichment.
         ceiling = SUBMARKET_CEILINGS.get(city, 1_800_000 if is_forsyth else 1_500_000)
+        # P2-14: submarket price-band marketability (sweet-spot / stretch / luxury),
+        # which is more nuanced than a single ceiling cutoff.
+        price_band_score = price_band_fit(market_value, city, county, zip_code)
         if market_value <= 0:
             apply(-3, "Property value unknown — enrich with AVM/assessment", "confidence", "warning")
             data_quality_notes.append("Market value missing — value-band fit and GCI not scored")
@@ -326,12 +345,15 @@ class LeadEngine:
             apply(-8, "Value under $200,000 minimum threshold", "fit", "failure")
             score_cap = min(score_cap, 39)
             hard_excluded = True
-        elif market_value <= ceiling:
-            apply(4, "Within submarket value band", "fit", "pass")
-        elif years_owned >= 10 and equity_ratio and equity_ratio >= 0.4:
-            apply(3, "Above ceiling but high-equity long-tenure — high-GCI listing candidate", "motivation", "pass")
         else:
-            apply(0, "Above submarket ceiling — verify listing motivation", "fit", "warning")
+            if price_band_score is not None and price_band_score >= 85:
+                apply(4, "Prime submarket price band", "fit", "pass", True)
+            elif price_band_score is not None and price_band_score >= 70:
+                apply(2, "Acceptable submarket price band", "fit", "pass", True)
+            elif price_band_score is not None and price_band_score < 50:
+                apply(-3, "Thin buyer pool for this price band", "fit", "warning", True)
+            if market_value > ceiling and years_owned >= 10 and equity_ratio and equity_ratio >= 0.4:
+                apply(3, "Above ceiling but high-equity long-tenure — high-GCI listing candidate", "motivation", "pass")
 
         # ── Probate / estate ─────────────────────────────────────────────────
         # Living trusts are common in affluent North Fulton suburbs — trust alone ≠ probate urgency.
@@ -646,32 +668,52 @@ class LeadEngine:
         osm_near_g  = prop.get("osm_nearest_grocery")
         osm_near_p  = prop.get("osm_nearest_park")
         osm_road    = prop.get("osm_major_road_nearby", False)
+        amenity_mkt = prop.get("amenity_marketability_score")   # P2-13 (preferred)
+        road_pen    = prop.get("road_noise_penalty")            # P2-13 distance-decay
 
-        if osm_score is not None:
+        # P2-13: prefer the continuous amenity marketability score when available.
+        if amenity_mkt is not None:
+            am = float(amenity_mkt)
+            if am >= 75:
+                apply(2, "Strong amenity access", "fit", "pass", True)
+            elif am >= 60:
+                apply(1, "Useful amenity access", "fit", "pass", True)
+        elif osm_score is not None:
             os_ = float(osm_score)
             if os_ >= 8:
                 apply(2, "Strong walkability and amenity access", "fit", "pass", True)
             elif os_ >= 5:
                 apply(1, "Useful nearby amenities", "fit", "pass", True)
 
-        if osm_near_g is not None and float(osm_near_g) <= 1.0:
-            apply(1, "Grocery access within one mile", "fit", "pass", True)
-        elif osm_grocery is not None and int(osm_grocery) >= 1:
-            apply(1, "Grocery access nearby", "fit", "pass", True)
+            if osm_near_g is not None and float(osm_near_g) <= 1.0:
+                apply(1, "Grocery access within one mile", "fit", "pass", True)
+            elif osm_grocery is not None and int(osm_grocery) >= 1:
+                apply(1, "Grocery access nearby", "fit", "pass", True)
 
-        if osm_near_p is not None and float(osm_near_p) <= 0.75:
-            apply(1, "Park access within 0.75 miles", "fit", "pass", True)
-        elif osm_park is not None and int(osm_park) >= 2:
-            apply(1, "Multiple parks within one mile", "fit", "pass", True)
+            if osm_near_p is not None and float(osm_near_p) <= 0.75:
+                apply(1, "Park access within 0.75 miles", "fit", "pass", True)
+            elif osm_park is not None and int(osm_park) >= 2:
+                apply(1, "Multiple parks within one mile", "fit", "pass", True)
 
-        if osm_road:
+        # Road noise: continuous distance-decay penalty when we have a distance,
+        # else the legacy boolean.
+        if road_pen is not None:
+            apply(round(float(road_pen)), "Major-road noise exposure (distance-scaled)", "fit", "warning")
+        elif osm_road:
             apply(-3, "Possible major-road noise exposure", "fit", "failure")
 
-        # ── School performance (GOSA ≥92 = $150K–$200K buyer premium in N. Fulton)
-        if school_score is not None:
-            ss = float(school_score)
-            if ss >= 92:
-                # School quality drives demand / liquidity (fit), NOT seller motivation
+        # ── School performance (P1-07: attendance-zone preferred; ZIP fallback labeled)
+        # Prefer the attendance-zone marketability score; fall back to legacy score.
+        school_market = prop.get("school_marketability_score")
+        school_src = prop.get("school_score_source", "unknown")
+        school_conf = float(prop.get("school_boundary_confidence") or 0)
+        ss_value = school_market if school_market is not None else school_score
+        if ss_value is not None:
+            ss = float(ss_value)
+            is_zip_fallback = (school_src == "zip_fallback")
+            # A coarse ZIP guess doesn't earn the top "premium" flag; an attendance-zone
+            # or directly-provided score does.
+            if ss >= 92 and not is_zip_fallback:
                 apply(3, "Premium school performance", "fit", "flag", True)
             elif ss >= 85:
                 apply(2, "Strong school performance", "fit", "pass", True)
@@ -679,6 +721,9 @@ class LeadEngine:
                 apply(1, "Solid school performance", "fit", "pass", True)
             elif ss < 65:
                 apply(-4, "Weaker school performance", "fit", "failure")
+            if is_zip_fallback:
+                data_quality_notes.append("School score is ZIP-level fallback, not attendance-zone verified")
+                apply(-1, "School score ZIP-fallback only", "confidence", "pass")
 
         # ── Data completeness → confidence calibration ─────────────────────────
         # Confidence answers "how much should we trust this lead's score?"
@@ -782,6 +827,27 @@ class LeadEngine:
         if tier == "WARM" and motivation_score < 45:
             tier = "COOL"
 
+        # P1-10 micro-market liquidity gate: outer Forsyth has slower buyer demand, so a
+        # generic lifecycle/equity profile should NOT outrank a comparable South Forsyth
+        # lead. It can still be HOT with true urgency, OR with corroborated lifecycle+
+        # financial intent AND real marketability (strong school / in-band price / contact).
+        micro = micro_market_for(zip_code, city)
+        flagset = set(flags)
+        is_outer_forsyth = micro["tier"] == "outer"
+        strong_urgency = len(flagset & URGENT_SIGNALS) >= 1
+        strong_lifecycle_financial = (len(flagset & LIFECYCLE_SIGNALS) >= 1
+                                      and len(flagset & FINANCIAL_SIGNALS) >= 1)
+        # Marketability here must be a STRONG, lead-specific signal — being in the
+        # normal price band isn't enough to make an outer-Forsyth generic lead HOT.
+        strong_marketability = (
+            (school_score is not None and float(school_score) >= 90)
+            or bool(phone or email)
+        )
+        if tier == "HOT" and is_outer_forsyth and not (
+                strong_urgency or (strong_lifecycle_financial and strong_marketability)):
+            tier = "WARM"
+            warnings.append("Outer Forsyth HOT held at WARM pending stronger urgency, marketability, or contact evidence")
+
         # REVIEW tier (audit §13.3): marketable property whose seller intent is unknown
         # only because data is missing — enrich rather than discard.
         tenure_unknown = not gsccca_connected
@@ -806,7 +872,38 @@ class LeadEngine:
             warnings.append("Already listed/Coming-Soon with a broker — NAR Article 16: do not solicit for listing")
             market_context.append("Source record is an active MLS listing; appropriate for buyer-side or comp use only, not seller prospecting")
 
+        # P0-05: explicit, channel-level outreach permissions.
+        outreach = _outreach_policy(prop, tier)
+
         strategy = _strategy(flags, failures, tier)
+        # Don't tell the agent to "call" an owner on the Do-Not-Call list.
+        if bool(prop.get("do_not_call")):
+            strategy = re.sub(r"\bcall\b", "contact compliantly", strategy, flags=re.IGNORECASE)
+
+        # P2-14: expected GCI from actual value (not a static string).
+        commission_rate = float(prop.get("listing_side_commission_rate") or 0.025)
+        expected_gci = round(market_value * commission_rate) if market_value > 0 else None
+        gci_range = (f"~${expected_gci:,.0f} per signed listing (illustrative)"
+                     if expected_gci else "Unknown until value confirmed")
+
+        # P2-12: uncalibrated business-priority proxy toward the probability-stack target.
+        intent_p   = motivation_score / 100
+        market_p   = fit_score / 100
+        contact_p  = contactability_score / 100
+        conf_f     = confidence_score / 100
+        compliance_f = 0 if tier == "COMPLIANCE_HOLD" else 1
+        business_priority_score = round(100 * (
+            intent_p
+            * (0.60 + 0.40 * market_p)
+            * (0.70 + 0.30 * contact_p)
+            * conf_f
+            * compliance_f
+        ), 1)
+
+        # P1-09: public-safe (fair-housing-neutral) labels for anything user-facing.
+        uniq_flags    = list(dict.fromkeys(flags))
+        uniq_passes   = list(dict.fromkeys(passes))
+        uniq_warnings = list(dict.fromkeys(warnings))
 
         return {
             **result,
@@ -817,16 +914,38 @@ class LeadEngine:
             "confidence_score": confidence_score,
             "contactability_score":     contactability_score,
             "operational_priority":     operational_priority,
-            "strategy":         strategy,
-            "flags":            list(dict.fromkeys(flags)),
-            "passes":           list(dict.fromkeys(passes)),
-            "warnings":         list(dict.fromkeys(warnings)),
+            "business_priority_score":  business_priority_score,
+            "strategy":         public_strategy(strategy),
+            "internal_strategy": strategy,
+            "flags":            uniq_flags,
+            "passes":           uniq_passes,
+            "warnings":         uniq_warnings,
             "failures":                list(dict.fromkeys(failures)),
+            # public-safe equivalents (UI/CSV should prefer these)
+            "public_flags":     [public_label(f) for f in uniq_flags],
+            "public_passes":    [public_label(p) for p in uniq_passes],
+            "public_warnings":  [public_label(w) for w in uniq_warnings],
             "priority_band":            _priority_band(tier),
             "estimated_conversion_pct": _conversion_pct(tier),
-            "expected_gci_range":       _gci_range(tier),
+            "expected_gci":             expected_gci,
+            "expected_gci_range":       gci_range,
             "data_quality_notes":       data_quality_notes,
             "market_context":           market_context,
+            # ── Outreach permissions (P0-05) ──────────────────────────────────
+            "seller_outreach_allowed":  outreach["seller_outreach_allowed"],
+            "outreach_policy":          outreach["outreach_policy"],
+            "allowed_channels":         outreach["allowed_channels"],
+            "blocked_channels":         outreach["blocked_channels"],
+            "contact_risk_notes":       outreach["contact_risk_notes"],
+            # ── Micro-market (P1-10) ──────────────────────────────────────────
+            "micro_market_tier":        micro["tier"],
+            "micro_market_liquidity_score": micro["liquidity"],
+            "micro_market_label":       micro["label"],
+            "price_band_fit_score":     price_band_score,
+            # ── Probability-stack proxy (P2-12, uncalibrated) ─────────────────
+            "intent_probability_proxy":        round(intent_p, 3),
+            "marketability_probability_proxy": round(market_p, 3),
+            "contact_probability_proxy":       round(contact_p, 3),
             # ── Debug / calibration export (raw components) ───────────────────
             "motivation_raw":           motivation_raw,
             "fit_raw":                  fit_raw,
@@ -840,6 +959,53 @@ class LeadEngine:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _outreach_policy(prop: dict, tier: str) -> dict:
+    """Channel-level outreach permissions (P0-05). DNC blocks phone; COMPLIANCE_HOLD
+    blocks all solicitation; no verified channel → review_required."""
+    do_not_call = bool(prop.get("do_not_call"))
+    phone   = bool((prop.get("phone") or "").strip())
+    email   = bool((prop.get("email") or "").strip())
+    mailing = bool((prop.get("owner_mailing_address") or "").strip())
+
+    if tier == "COMPLIANCE_HOLD":
+        return {
+            "seller_outreach_allowed": False,
+            "outreach_policy": "do_not_solicit",
+            "allowed_channels": [],
+            "blocked_channels": ["phone", "email", "mail"],
+            "contact_risk_notes": ["Already listed or may be represented; do not solicit listing business."],
+        }
+
+    allowed, blocked, notes = [], [], []
+    if phone and not do_not_call:
+        allowed.append("phone")
+    elif phone and do_not_call:
+        blocked.append("phone")
+        notes.append("Phone blocked by Do-Not-Call flag; use non-phone channels only.")
+    if email:
+        allowed.append("email")
+    if mailing:
+        allowed.append("mail")
+
+    if not allowed:
+        return {
+            "seller_outreach_allowed": False,
+            "outreach_policy": "review_required",
+            "allowed_channels": [],
+            "blocked_channels": blocked,
+            "contact_risk_notes": notes + ["No verified outreach channel available — skip-trace first."],
+        }
+
+    policy = "mail_only" if allowed == ["mail"] else "seller_outreach_allowed"
+    return {
+        "seller_outreach_allowed": True,
+        "outreach_policy": policy,
+        "allowed_channels": allowed,
+        "blocked_channels": blocked,
+        "contact_risk_notes": notes,
+    }
+
 
 def _is_corporate(name_upper: str) -> bool:
     padded = " " + name_upper.lower() + " "

@@ -10,7 +10,9 @@ GSCCCA county coverage: all 159 Georgia counties since 1/1/1990.
 """
 
 import re
+import time
 from datetime import date, datetime
+from html.parser import HTMLParser
 from typing import Optional
 
 import requests
@@ -108,10 +110,14 @@ class GsccaClient:
             self._logged_in = False
             return False
 
-    def lookup_deed(self, owner_name: str, county: str) -> dict:
+    def lookup_deed(self, owner_name: str, county: str, situs_address: str = "") -> dict:
         """
-        Return the most recent deed for this owner in this county.
-        Result: {years_owned, transfer_type, gsccca_verified: True}
+        Return the most recent deed for this owner in this county, WITH a match
+        confidence (P1-08). Result on a confident match:
+          {years_owned, transfer_type, gsccca_verified: True,
+           gsccca_match_confidence, gsccca_recording_date, gsccca_grantee, ...}
+        Ambiguous / weak matches return gsccca_verified=False + gsccca_warning
+        (the engine routes those to REVIEW instead of scoring false tenure).
         Returns {} on failure, no match, or unconfigured.
         """
         if not self._logged_in or not self._session:
@@ -125,11 +131,16 @@ class GsccaClient:
         if len(search_name) < 2:
             return {}
 
-        cache_key = (search_name.upper(), county_id)
+        # Stronger cache key: include situs address so two owners with the same name
+        # in one county don't collide.
+        cache_key = (search_name.upper(), county_id, (situs_address or "").upper().strip())
         if cache_key in self._cache:
             return self._cache[cache_key]
 
         today = date.today()
+        # P1-08: pull live hidden form fields (dtSystemEnd / dtSysGoodThru / etc.)
+        # instead of hardcoding stale dates.
+        hidden = self._fetch_hidden_fields()
         payload = {
             "txtSearchType":    "0",
             "bolInclude":       "0",
@@ -137,35 +148,45 @@ class GsccaClient:
             "txtPartyType":     "0",           # Grantee (current owner received the deed)
             "txtInstrCode":     "ALL",
             "intCountyID":      county_id,
-            "MaxRows":          "10",
+            "MaxRows":          "25",
             "TableType":        "2",           # 1-line compact format
             "txtFromDate":      "01/01/1990",
             "txtToDate":        today.strftime("%m/%d/%Y"),
-            "dtSystemEnd":      "6/25/2026",
-            "dtSystemStart":    "12/31/1871",
-            "dtSysGoodFrom":    "1/1/1990",
-            "dtSysGoodThru":    "5/13/2026",
             "dtCurrSearchTime": today.strftime("%-m/%-d/%Y") + " 12:00:00 PM",
         }
+        # Use live hidden values where present; fall back to safe static defaults.
+        for k, default in (("dtSystemEnd", today.strftime("%-m/%-d/%Y")),
+                           ("dtSystemStart", "12/31/1871"),
+                           ("dtSysGoodFrom", "1/1/1990"),
+                           ("dtSysGoodThru", today.strftime("%-m/%-d/%Y"))):
+            payload[k] = hidden.get(k, default)
 
+        # Bounded retry/backoff for transient network errors.
+        last_exc = None
+        for attempt in range(3):
+            try:
+                r = self._session.post(
+                    SEARCH_URL, data=payload,
+                    headers={**_HEADERS, "Referer": SEARCH_PAGE}, timeout=TIMEOUT,
+                )
+                if "login.asp" in r.url or ("txtPassword" in r.text and len(r.text) < 5_000):
+                    self._logged_in = False
+                    return {}
+                result = _parse_results(r.text, search_name=search_name)
+                self._cache[cache_key] = result
+                return result
+            except requests.RequestException as exc:
+                last_exc = exc
+                time.sleep(1.5 * (attempt + 1))
+        return {}
+
+    def _fetch_hidden_fields(self) -> dict:
+        """GET the search page and return its hidden <input> name→value map."""
         try:
-            r = self._session.post(
-                SEARCH_URL,
-                data=payload,
-                headers={**_HEADERS, "Referer": SEARCH_PAGE},
-                timeout=TIMEOUT,
-            )
-            # Session expired → GSCCCA redirects to login
-            if "login.asp" in r.url or (
-                "txtPassword" in r.text and len(r.text) < 5_000
-            ):
-                self._logged_in = False
-                return {}
-
-            result = _parse_results(r.text)
-            self._cache[cache_key] = result
-            return result
-
+            r = self._session.get(SEARCH_PAGE, headers=_HEADERS, timeout=TIMEOUT)
+            parser = _HiddenInputParser()
+            parser.feed(r.text)
+            return parser.fields
         except Exception:
             return {}
 
@@ -203,14 +224,62 @@ def _normalize_name(owner_name: str) -> str:
     return name[:50].strip()
 
 
-def _parse_results(html: str) -> dict:
+class _HiddenInputParser(HTMLParser):
+    """Collect hidden <input name=... value=...> pairs from a page (P1-08)."""
+    def __init__(self):
+        super().__init__()
+        self.fields: dict[str, str] = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "input":
+            return
+        a = dict(attrs)
+        if a.get("type", "").lower() == "hidden" and a.get("name"):
+            self.fields[a["name"]] = a.get("value", "")
+
+
+def _name_match_confidence(search_name: str, grantee: str) -> float:
+    """Score how well a result's grantee matches the searched owner (P1-08)."""
+    # Derive last/first from the comma BEFORE stripping punctuation.
+    raw = (search_name or "").upper()
+    last = first = ""
+    if "," in raw:
+        l, _, rest = raw.partition(",")
+        last = re.sub(r"[^A-Z]", "", l.split()[0]) if l.split() else ""
+        first = re.sub(r"[^A-Z]", "", rest.split()[0]) if rest.split() else ""
+
+    s = re.sub(r"[^A-Z ]", "", raw).strip()
+    g = re.sub(r"[^A-Z ]", "", (grantee or "").upper()).strip()
+    if not s or not g:
+        return 0.0
+    if s == g:
+        return 0.95
+    s_tokens, g_tokens = set(s.split()), set(g.split())
+    # entity terms (TRUST/ESTATE/LLC) — substring match is meaningful
+    if any(t in g for t in ("TRUST", "ESTATE", "HEIRS", "LLC", "INC")) and (s in g or g in s):
+        return 0.75
+    if not s_tokens:
+        return 0.0
+    if last and first and last in g_tokens and first in g_tokens:
+        return 0.85
+    overlap = len(s_tokens & g_tokens) / len(s_tokens)
+    if overlap >= 0.5:
+        return 0.55
+    if last and last in g_tokens:
+        return 0.40
+    return 0.20
+
+
+def _parse_results(html: str, search_name: str = "") -> dict:
     """
-    Parse GSCCCA 1-line result table HTML.
-    Returns the most recent non-security-deed entry as:
-      {years_owned, transfer_type, gsccca_verified: True}
+    Parse GSCCCA 1-line result table HTML with match confidence + ambiguity (P1-08).
 
     Column order for TableType=2 (1 Line) is typically:
       Grantee | County | Instrument | Recording Date | Book | Page
+
+    Returns a confident match with gsccca_verified=True, OR (on ambiguity / weak
+    match) gsccca_verified=False with a gsccca_warning so the engine can route the
+    record to REVIEW instead of trusting a possibly-wrong tenure.
     """
     rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.S | re.I)
     today = date.today()
@@ -223,7 +292,6 @@ def _parse_results(html: str) -> dict:
         if len(cells) < 3:
             continue
 
-        # Extract recording date (MM/DD/YYYY anywhere in the row)
         rec_date: Optional[datetime] = None
         for cell in cells:
             m = re.search(r'\b(\d{1,2}/\d{1,2}/\d{4})\b', cell)
@@ -236,33 +304,55 @@ def _parse_results(html: str) -> dict:
         if rec_date is None:
             continue
 
-        # Extract instrument type
         row_text = " ".join(cells).upper()
-        transfer = "warranty deed"   # default assumption
+        transfer = "warranty deed"
         for key, mapped in INSTRUMENT_MAP.items():
             if key in row_text:
                 transfer = mapped
                 break
-
-        # Skip security deeds (mortgage recordings) — not an ownership transfer
         if transfer == "security deed":
             continue
 
+        grantee = cells[0] if cells else ""
+        book = next((c for c in cells if re.fullmatch(r'\d{3,6}', c)), "")
         years = (today - rec_date.date()).days // 365
         deeds.append({
             "recording_date":  rec_date,
             "years_owned":     max(0, years),
             "transfer_type":   transfer,
+            "grantee":         grantee,
+            "book":            book,
+            "confidence":      _name_match_confidence(search_name, grantee),
         })
 
     if not deeds:
         return {}
 
-    # Most recent ownership deed
     deeds.sort(key=lambda d: d["recording_date"], reverse=True)
     best = deeds[0]
+    top_conf = best["confidence"]
+
+    # Ambiguity: more than one DISTINCT grantee with comparably strong confidence.
+    strong = [d for d in deeds if d["confidence"] >= 0.55]
+    distinct_grantees = {d["grantee"].upper() for d in strong}
+    ambiguous = len(distinct_grantees) > 1
+
+    if top_conf < 0.70 or ambiguous:
+        return {
+            "gsccca_verified":         False,
+            "gsccca_match_confidence": round(top_conf, 2),
+            "gsccca_warning":          ("Ambiguous owner match; manual deed verification required"
+                                        if ambiguous else
+                                        "Low-confidence owner match; manual verification required"),
+        }
+
     return {
-        "years_owned":      best["years_owned"],
-        "transfer_type":    best["transfer_type"],
-        "gsccca_verified":  True,
+        "years_owned":             best["years_owned"],
+        "transfer_type":           best["transfer_type"],
+        "gsccca_verified":         True,
+        "gsccca_match_confidence": round(top_conf, 2),
+        "gsccca_recording_date":   best["recording_date"].strftime("%Y-%m-%d"),
+        "gsccca_grantee":          best["grantee"],
+        "gsccca_book":             best["book"],
+        "gsccca_warning":          None,
     }

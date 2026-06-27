@@ -1,8 +1,25 @@
-.DS_Store
-__pycache__/
-*.py[cod]
+# Secrets — never commit (P0-03)
+config.py
+local_settings.json
 .env
-venv/
+.env.*
+!.env.example
+*.secrets.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
 .venv/
-exports/
-*.csv
+venv/
+
+# Local data / outcomes DB
+*.sqlite
+*.sqlite3
+outcomes.db
+data/cache/
+
+# OS
+.DS_Store

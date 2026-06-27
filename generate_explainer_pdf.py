@@ -571,9 +571,10 @@ def build():
     fit_signals = [
         ("Target geography (North Fulton or Forsyth)", "+12", "In your service area — Alpharetta, Milton, Johns Creek, Roswell, Sandy Springs, or Forsyth County"),
         ("Single family residential home",             "+8",  "The strongest fit — detached SFR is your core listing type"),
-        ("1995–2009 build year",                       "+5",  "These homes are entering the 18–30 year renovation cycle — owners often prefer to sell rather than renovate"),
-        ("Within submarket price range",               "+4",  "Price is appropriate for the specific city (e.g., Milton ceiling is $3M; Roswell is $1.6M)"),
-        ("Pre-1985 build year",                        "+4",  "Older homes have renovation upside — buyers can add value, making the listing more attractive"),
+        ("2005–2020 build year",                       "+6",  "Prime retail-buyer lifecycle band for North Fulton / South Forsyth — newer layouts buyers want"),
+        ("2021+ or 1995–2004 build year",              "+4",  "Modern or established inventory with broad retail buyer appeal"),
+        ("Prime submarket price band",                 "+4",  "Price sits in the city's sweet-spot band (sweet-spot / stretch / luxury, per submarket)"),
+        ("Pre-1985 build year",                        "−1",  "Older systems/layouts can narrow the retail buyer pool (no longer rewarded)"),
         ("Premium school zone (CCRPI ≥ 92)",           "+3",  "Top school zone adds significant buyer demand and faster sales"),
         ("High-income census tract (≥$180K income)",  "+2",  "Affluent neighborhood — strong buyer pool"),
         ("Premium tract home values (≥$650K median)", "+2",  "Area already commands high prices — supports premium listing"),
@@ -686,15 +687,14 @@ def build():
     story.append(Spacer(1, 6))
 
     formulas = [
-        (RED,   "🔥 Motivation Score", "30 + (motivation_raw × 2.4)",
-         "Starts at 30. Every point of raw motivation is worth 2.4 points on the "
-         "final scale. So if an owner has tax distress (+18) and is out-of-state (+14), "
-         "that's 32 raw points → 30 + (32 × 2.4) = 30 + 76.8 = <b>106.8</b> — "
-         "but it gets capped at 100."),
-        (BLUE,  "🎯 Fit Score",        "45 + (fit_raw × 2.1)",
-         "Starts at 45. Every point of raw fit is worth 2.1 points. A North Fulton "
-         "SFR in the right price band (+12 + +8 + +4 = 24 raw) → "
-         "45 + (24 × 2.1) = 45 + 50.4 = <b>95.4</b>."),
+        (RED,   "🔥 Motivation Score", "100 / (1 + e^(−0.076 × (motivation_raw − 11.1)))",
+         "A logistic (S-shaped) curve. One strong signal lands around 55–65; stacked "
+         "signals climb toward ~95 without everyone pinning at 100. This lets the top "
+         "leads be ranked against each other instead of all looking identical."),
+        (BLUE,  "🎯 Fit Score",        "100 / (1 + e^(−0.11 × (fit_raw − 20)))",
+         "Also logistic. The old linear formula saturated at 100 for any ordinary "
+         "target-market home, so good and excellent listings looked the same. The curve "
+         "spreads adequate, good, and excellent listings apart so ranking stays useful."),
         (GREEN, "✅ Confidence Score", "72 + (confidence_raw × 4)",
          "Starts at 72 — already high because MLS data is reliable. Every raw point "
          "is worth 4 final points. Confirmed homestead (+3) and HPI growth (+2) = "
@@ -1030,14 +1030,16 @@ def build():
     story.append(Spacer(1, 6))
 
     summary_lines = [
-        "motivation_score  =  clamp( 30 + motivation_raw × 2.4,   0, 100 )",
-        "fit_score         =  clamp( 45 + fit_raw × 2.1,           0, 100 )",
+        "motivation_score  =  100 / (1 + e^(−0.076 × (motivation_raw − 11.1)))   ← logistic",
+        "fit_score         =  100 / (1 + e^(−0.11 × (fit_raw − 20)))             ← logistic",
         "confidence_score  =  clamp( 72 + confidence_raw × 4,      0, 100 )",
         "",
         "blended  =  (motivation_score × 0.60) + (fit_score × 0.25) + (confidence_score × 0.15)",
         "final    =  min( blended,  score_cap )   ← capped by any hard disqualifiers",
         "",
-        "HOT ≥ 70  |  WARM ≥ 55  |  COOL ≥ 40  |  PASS < 40  (discarded)",
+        "HOT ≥ 70  |  WARM ≥ 55  |  COOL ≥ 40  |  REVIEW (intent unknown)  |  PASS < 40",
+        "HOT also requires independent intent evidence (the HOT evidence gate).",
+        "COMPLIANCE_HOLD = already-listed owners — never solicited (NAR Art. 16).",
     ]
 
     formula_block = Table(

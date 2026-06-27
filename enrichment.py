@@ -210,12 +210,14 @@ class Enricher:
     # ── School ───────────────────────────────────────────────────────────────
 
     def _apply_school(self, prop: dict):
-        if prop.get("school_performance_score") is not None:
-            return  # already populated (e.g., demo data)
-        zip_ = (prop.get("zip_code") or "")[:5]
-        score = GOSA_BY_ZIP.get(zip_)
-        if score is not None:
-            prop["school_performance_score"] = score
+        # P1-07: prefer attendance-zone resolution; fall back to ZIP (labeled).
+        from school_service import compute_school_fields
+        fields = compute_school_fields(prop)
+        for k, v in fields.items():
+            prop.setdefault(k, v)
+        # Back-compat: keep school_performance_score populated for any older consumer.
+        if prop.get("school_performance_score") is None and fields.get("school_marketability_score") is not None:
+            prop["school_performance_score"] = fields["school_marketability_score"]
 
     # ── FRED ─────────────────────────────────────────────────────────────────
 
@@ -443,8 +445,14 @@ out center;
         }
         if nearest_grocery is not None:
             enriched["osm_nearest_grocery"] = round(nearest_grocery, 2)
+            enriched["distance_to_grocery_mi"] = round(nearest_grocery, 2)
         if nearest_park is not None:
             enriched["osm_nearest_park"] = round(nearest_park, 2)
+            enriched["distance_to_park_mi"] = round(nearest_park, 2)
+
+        # P2-13: continuous distance-decay amenity/road features.
+        from geo_features import compute_geo_fields
+        enriched.update(compute_geo_fields({**prop, **enriched}))
 
         self._osm_cache[grid_key] = enriched
         prop.update(enriched)
