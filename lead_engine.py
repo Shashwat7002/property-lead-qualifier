@@ -5,26 +5,45 @@ Multi-dimensional weighted scoring for North Fulton / Forsyth County listing lea
 Target: individual homebuyers (families, move-up, downsizers) — NOT investors/flippers.
 
 Score formula
-  motivationScore  = clamp(30 + motivationRaw × 2.4,  0, 100)
-  fitScore         = clamp(45 + fitRaw × 2.1,          0, 100)
-  confidenceScore  = clamp(72 + confidenceRaw × 4,     0, 100)
+  motivationScore  = 100 / (1 + e^(-0.076·(motivationRaw − 11.1)))   ← logistic
+  fitScore         = clamp(45 + fitRaw × 2.1,  0, 100)
+  confidenceScore  = clamp(72 + confidenceRaw × 4, 0, 100)
   blended          = motivationScore×0.6 + fitScore×0.25 + confidenceScore×0.15
 
-Tiers  HOT ≥70  |  WARM ≥55  |  COOL ≥40  |  PASS <40
+Tiers  HOT ≥70  |  WARM ≥55  |  COOL ≥40  |  PASS <40   (+ REVIEW, see below)
+Tier gates (audit §13.3): HOT requires motivationScore ≥ 62; WARM requires ≥ 45 —
+fit/confidence alone cannot manufacture a top tier from a low-intent owner.
+REVIEW: marketable property (fit ≥ 60) whose seller intent is UNKNOWN (no GSCCCA
+tenure) and would otherwise fall to COOL/PASS — routed for data enrichment, not discard.
+
+── KEY CHANGES FROM EXTERNAL AUDIT (2026-06-26) ───────────────────────────────
+  • Motivation uses a LOGISTIC transform, not linear — fixes the "fast saturation"
+    defect where every motivated lead pinned at 100 and the top tier was unrankable.
+  • Tenure-null bug fixed: live FMLS unknown tenure is None (lowers confidence),
+    never 0 (which falsely fired the −18 short-tenure penalty).
+  • Homestead penalty softened −12→−4; owner-occupant lifecycle made net-positive.
+  • Macro signals (HPI, unemployment) route to market_context, NOT confidence.
+  • FRED HPI fixed: county-specific series + true YoY (was Fulton-only, 12-yr gap).
+  • Georgia tax intelligence + South Forsyth micro-market + Coming Soon priority added.
 
 ── SCORING ASSUMPTIONS (analysis-assumptions-log) ─────────────────────────────
 All weights below are expert-assumed, not empirically derived from conversion data.
-Recalibrate against actual listing-agreement outcomes once ≥100 conversions are logged.
+The audit is explicit: these become trustworthy only after outcome calibration.
+estimated_conversion_pct is therefore RELATIVE priority, not a promised rate.
+ROADMAP (audit §8): migrate to a probability stack — P(intent)·marketability·
+confidence·contactability·E[GCI] — and fit logistic/hazard coefficients from logged
+listing outcomes (mailed→contacted→appointment→signed). Recalibrate at ≥100 outcomes.
 
   Dimension weights   motivation 60 / fit 25 / confidence 15
-  Formula baselines   motivation base 30, fit base 45, confidence base 72
+  Logistic params     k=0.076, x0=11.1  (raw 4→37, 12→52, 18→63, 30→81, 50→95)
   Key signal weights  probate +18, tax distress +18, free-and-clear +15,
                       OOS absentee +14, empty-nest +8, vacancy +8,
                       long tenure (15+ yr) +10, Mom-and-Pop +8, senior +6,
                       upgrade seller +6, in-state absentee +6
-  Hard caps           outside geography → 39, commercial → 39, value <$200K → 39,
-                      institutional → 39, no motivation (raw ≤5, no positive flag) → 38,
-                      OOS without confirmed 10+ yr tenure → 54
+  Hard caps (verified disqualifiers only — never on missing data):
+                      outside geography → 39, commercial → 39, value <$200K → 39,
+                      institutional → 39, no motivation → 38,
+                      OOS with GSCCCA-confirmed <10 yr tenure → 54
 
 ── DATA SOURCES ────────────────────────────────────────────────────────────────
   FMLS        Active/off-market listings (property_type, bedrooms, year_built, ListPrice)
@@ -38,6 +57,7 @@ Recalibrate against actual listing-agreement outcomes once ≥100 conversions ar
   GOSA        School CCRPI by ZIP (≥92 = $150K–$200K buyer premium in North Fulton)
 """
 
+import math
 import re
 
 CURRENT_YEAR = 2026
@@ -68,6 +88,11 @@ SUBMARKET_CEILINGS = {
     "roswell":      1_600_000,
 }
 
+# South Forsyth (high-demand, newer, school-sensitive family submarket near
+# Halcyon / GA-400) behaves very differently from rural outer Forsyth. The audit
+# (§6.1, Appendix C) flags that scoring all Forsyth identically hides the best leads.
+SOUTH_FORSYTH_ZIPS = {"30005", "30024", "30040", "30041"}
+
 POSITIVE_MOTIVATION_FLAGS = {
     "Out-of-state absentee", "In-state absentee",
     "Probate, trust, or estate signal", "Verified tax or foreclosure distress",
@@ -76,6 +101,8 @@ POSITIVE_MOTIVATION_FLAGS = {
     "No homestead on likely SFR", "Free and clear", "High-equity owner",
     "Owner-occupied with long tenure", "Mom-and-Pop landlord",
     "Ownership transfer anomaly", "Upgrade seller — move-up listing candidate",
+    "Homestead downsizer window — long-tenure owner-occupant",
+    "Homestead move-up window — equity-rich family owner-occupant",
 }
 
 
@@ -87,6 +114,8 @@ class LeadEngine:
         # ── Parse inputs ─────────────────────────────────────────────────────
         county        = (prop.get("county") or "").lower()
         city          = (prop.get("city") or "").lower().strip()
+        zip_code      = (str(prop.get("zip_code") or "").strip())[:5]
+        listing_status = (prop.get("listing_status") or "").lower().strip()
         prop_type     = (prop.get("property_type") or "").lower()
         owner_name    = (prop.get("owner_name") or "").upper()
         years_owned_raw  = prop.get("years_owned")
@@ -122,11 +151,13 @@ class LeadEngine:
         confidence_raw = 0
         exec_fit_used  = 0
         score_cap      = 100
+        hard_excluded  = False   # True only for verified business-rule disqualifiers
         flags              = []
         passes             = []
         warnings           = []
         failures           = []
         data_quality_notes = []
+        market_context     = []
 
         def apply(points, message, category, reason_type, cap_exec=False):
             nonlocal motivation_raw, fit_raw, confidence_raw, exec_fit_used
@@ -165,11 +196,13 @@ class LeadEngine:
         else:
             apply(-18, "Outside North Fulton or Forsyth County", "fit", "failure")
             score_cap = min(score_cap, 39)
+            hard_excluded = True
 
         # ── Property type ────────────────────────────────────────────────────
         if re.search(r"commercial|industrial|office|retail|hotel|storage|hospital|church|school", prop_type):
             apply(-20, "Nonresidential asset type", "fit", "failure")
             score_cap = min(score_cap, 39)
+            hard_excluded = True
         elif re.search(r"single|sfr|detached|residential", prop_type):
             apply(8, "Strong residential property fit", "fit", "pass")
         elif re.search(r"townhouse|townhome|condo|attached", prop_type):
@@ -200,10 +233,17 @@ class LeadEngine:
                 apply(3, f"Owned {years_owned}+ years", "motivation", "pass")
 
         # ── Market value ─────────────────────────────────────────────────────
+        # Audit T25: a MISSING value (0/None) is unknown, not "sub-$200k". Only a
+        # positive value below threshold is a true business-rule exclusion; an
+        # unknown value lowers confidence and requires AVM/assessment enrichment.
         ceiling = SUBMARKET_CEILINGS.get(city, 1_800_000 if is_forsyth else 1_500_000)
-        if market_value < 200_000:
+        if market_value <= 0:
+            apply(-3, "Property value unknown — enrich with AVM/assessment", "confidence", "warning")
+            data_quality_notes.append("Market value missing — value-band fit and GCI not scored")
+        elif market_value < 200_000:
             apply(-8, "Value under $200,000 minimum threshold", "fit", "failure")
             score_cap = min(score_cap, 39)
+            hard_excluded = True
         elif market_value <= ceiling:
             apply(4, "Within submarket value band", "fit", "pass")
         elif years_owned >= 10 and equity_ratio and equity_ratio >= 0.4:
@@ -248,6 +288,7 @@ class LeadEngine:
             if _is_institutional(owner_name, total_props):
                 apply(-15, "Institutional entity owner — excluded per ownership filter", "fit", "failure")
                 score_cap = min(score_cap, 39)
+                hard_excluded = True
             else:
                 # Small family / landlord LLC — eligible for portfolio-exit listing conversion
                 apply(5, "Small-entity owner — portfolio-exit listing candidate", "motivation", "pass")
@@ -273,21 +314,65 @@ class LeadEngine:
             apply(1, "Owner-occupied or same-address owner", "motivation", "pass")
 
         # ── Homestead exemption ───────────────────────────────────────────────
+        # Audit §6.6 (the most important Realtor-specific fix): most retail listings
+        # are owner-occupied before sale. A -12 penalty buries normal owner-occupant
+        # lifecycle sellers. Homestead alone is a mild negative (-4); it becomes net
+        # POSITIVE when paired with a lifecycle/equity transition window.
         if homestead:
             has_other = any(f in flags for f in [
                 "Probate, trust, or estate signal", "Verified tax or foreclosure distress",
                 "Property-level vacancy indicator", "Out-of-state absentee", "In-state absentee",
                 "Senior exemption lifecycle signal",
             ])
-            apply(-6 if has_other else -12, "Verified owner-occupied homestead", "motivation", "failure")
+            apply(-3 if has_other else -4, "Verified owner-occupied homestead", "motivation", "warning")
             apply(3, "Homestead status verified", "confidence", "pass")
-            if mortgage_year and 2018 <= int(mortgage_year) <= 2022:
-                apply(-6, "Rate-lock cohort: 2018–22 mortgage — sub-4% rate creates move-up friction", "motivation", "failure")
+
+            # Owner-occupant lifecycle positives (audit §6.6 recommended replacement).
+            # These name the normal-seller patterns the old model was blind to.
+            if gsccca_connected and years_owned >= 20 and (senior_exemption or bedrooms >= 4):
+                apply(8, "Homestead downsizer window — long-tenure owner-occupant", "motivation", "flag")
+            elif gsccca_connected and years_owned >= 10 and bedrooms >= 4 and equity_ratio and equity_ratio >= 0.40:
+                apply(6, "Homestead move-up window — equity-rich family owner-occupant", "motivation", "flag")
+
+            # Rate-lock is archetype-dependent (audit §8.5): it only bites owners who
+            # must finance a NEXT purchase. Downsizers, free-and-clear, senior, and
+            # relocating (absentee) sellers are largely immune — skip the penalty.
+            rate_lock_immune = free_and_clear or senior_exemption or is_oos or is_instate
+            if mortgage_year and 2018 <= int(mortgage_year) <= 2022 and not rate_lock_immune:
+                apply(-5, "Rate-lock cohort: 2018–22 sub-4% mortgage — move-up friction", "motivation", "warning")
 
         # ── Senior exemption ──────────────────────────────────────────────────
         if senior_exemption:
             apply(6, "Senior exemption lifecycle signal", "motivation", "flag")
             apply(2, "Senior exemption verified", "confidence", "pass")
+
+        # ── Georgia tax intelligence (carrying-cost marketability) ─────────────
+        # From the quantitative design report: Forsyth County has materially lower
+        # carrying costs than Fulton, and its Code L1 senior exemption ELIMINATES
+        # school M&O + bond tax with no income limit (worth ~$10K/yr on a $1.5M home).
+        # Lower TCO = stronger retail buyer demand (fit). A Forsyth senior who has
+        # maximized that benefit and held long is a clean downsizer story (motivation).
+        if is_forsyth:
+            apply(1, "Forsyth lower tax burden — favorable carrying cost for buyers", "fit", "pass", True)
+            if senior_exemption:
+                market_context.append("Forsyth Code L1 senior exemption — school tax eliminated (no income limit); strong downsizer net-sheet story")
+                if gsccca_connected and years_owned >= 15:
+                    apply(3, "Forsyth senior downsizer — long tenure + full school-tax exemption", "motivation", "pass")
+        elif is_fulton and senior_exemption:
+            market_context.append("Fulton senior school-tax exemption is income-limited — higher carrying cost than Forsyth; useful net-sheet talking point")
+
+        # South Forsyth micro-market: the high-demand newer family corridor.
+        if is_forsyth and zip_code in SOUTH_FORSYTH_ZIPS:
+            apply(2, "South Forsyth corridor — high-demand newer family submarket", "fit", "pass", True)
+        elif is_forsyth and zip_code and zip_code not in SOUTH_FORSYTH_ZIPS:
+            market_context.append("Outer/rural Forsyth ZIP — verify school cluster and DOM; not South Forsyth demand profile")
+
+        # ── FMLS listing status (Coming Soon = day-one priority) ───────────────
+        # Coming Soon listings don't accrue DOM yet (FMLS Rule). Audit/design report:
+        # prioritize them so the agent is ready on day one of the active window.
+        if "coming soon" in listing_status:
+            apply(2, "Coming Soon listing — engage before active window opens", "fit", "flag", True)
+            market_context.append("Coming Soon status — DOM not yet accruing; prioritize day-one outreach")
 
         # ── Vacancy ───────────────────────────────────────────────────────────
         if vacancy:
@@ -380,7 +465,10 @@ class LeadEngine:
             if abs(est_purchase_year - year_built) <= 2:
                 apply(3, "Likely original owner — bought new, peak equity and lifecycle alignment", "motivation", "pass")
 
-        # ── FRED macro signals ────────────────────────────────────────────────
+        # ── FRED macro signals (market context, NOT data confidence) ───────────
+        # Audit §5.2/§6.16: macro variables describe the market, not the reliability
+        # of this lead's data. They route to motivation (seller-timing pressure) or
+        # to a non-scoring market-context note — never to the confidence dimension.
         fred_mortgage = prop.get("fred_mortgage_rate")
         fred_unemp    = prop.get("fred_unemployment_rate")
         fred_hpi      = prop.get("fred_hpi_growth")
@@ -389,24 +477,29 @@ class LeadEngine:
             if float(fred_mortgage) >= 6.25:
                 if is_oos or is_instate:
                     apply(2, "Higher-rate environment may pressure non-owner holdings", "motivation", "pass")
-                elif years_owned >= 5:
-                    apply(-2, "Rate-lock headwind for owner-occupied sellers", "motivation", "failure")
+                # Owner-occupant rate-lock is handled archetype-aware in the homestead
+                # block (mortgage_year + must-buy-next), not as a blanket macro penalty.
 
         if fred_unemp is not None:
-            if float(fred_unemp) <= 3.5:
-                apply(1, "Stable Atlanta labor market", "confidence", "pass")
-            elif float(fred_unemp) >= 5.0:
-                apply(3, "Local job-market stress — may accelerate seller decisions", "motivation", "pass")
+            u = float(fred_unemp)
+            if u >= 5.0:
+                apply(2, "Local job-market stress — may accelerate seller decisions", "motivation", "pass")
+            else:
+                market_context.append(f"Atlanta unemployment {u:.1f}% — healthy demand backdrop")
 
         if fred_hpi is not None:
+            # Thresholds recalibrated for the corrected county-specific annual YoY
+            # (audit §6.12): real 2025 growth is ~2.4% Forsyth / ~1.2% Fulton, so the
+            # old 10%/20% gates never fired. Use realistic post-surge bands.
             hpi = float(fred_hpi)
-            if hpi >= 0.20:
-                apply(2, "Strong county HPI growth — equity build confirmed", "confidence", "pass")
+            if hpi >= 0.05:
+                market_context.append(f"County HPI +{hpi*100:.1f}% YoY — strong equity build")
                 if is_oos or is_instate:
-                    # Absentee owners most likely to time market exit when values are high
-                    apply(2, "Strong HPI — equity-rich absentee may time market exit", "motivation", "pass")
-            elif hpi >= 0.10:
-                apply(1, "Positive county HPI — appreciating market", "confidence", "pass")
+                    apply(2, "Appreciating market — equity-rich absentee may time exit", "motivation", "pass")
+            elif hpi >= 0.02:
+                market_context.append(f"County HPI +{hpi*100:.1f}% YoY — steady appreciation")
+            elif hpi < 0:
+                market_context.append(f"County HPI {hpi*100:.1f}% YoY — softening; price discipline matters")
 
         # ── Census tract signals ──────────────────────────────────────────────
         census_income  = prop.get("census_median_income")
@@ -542,13 +635,43 @@ class LeadEngine:
                 warnings.append("OOS absentee — GSCCCA offline, 10-yr tenure unverified")
 
         # ── Blend scores ──────────────────────────────────────────────────────
-        motivation_score = max(0, min(100, round(30 + motivation_raw * 2.4)))
+        # Motivation uses a LOGISTIC transform (audit §5.2/§8.2 — fixes the Figure 1
+        # "fast saturation" defect). The old linear 30+raw×2.4 pinned every motivated
+        # lead at 100, so a probate-only lead and an estate+absentee+vacant+free-clear
+        # lead scored identically and the top tier could not be ranked. The logistic
+        # gives diminishing returns: one strong signal lands ~55-65, stacked signals
+        # spread up toward ~95 without everyone hitting the ceiling.
+        #   raw  -18 → 10   |  4 → 37  |  12 → 52  |  18 → 63  |  30 → 81  |  50 → 95
+        motivation_score = round(100 / (1 + math.exp(-0.076 * (motivation_raw - 11.1))))
+        motivation_score = max(0, min(100, motivation_score))
         fit_score        = max(0, min(100, round(45 + fit_raw * 2.1)))
         confidence_score = max(0, min(100, round(72 + confidence_raw * 4)))
         blended = motivation_score * 0.6 + fit_score * 0.25 + confidence_score * 0.15
         score   = max(0, min(100, min(round(blended), score_cap)))
 
-        tier     = _tier(score)
+        # ── Tier gates (audit §13.3) ──────────────────────────────────────────
+        # A lead is HOT only if seller INTENT is genuinely high — not because a
+        # marketable property (fit) and complete data (confidence) carried a weak
+        # owner over the line. Likewise WARM needs at least moderate intent.
+        tier = _tier(score)
+        if tier == "HOT" and motivation_score < 62:
+            tier = "WARM"
+            warnings.append("Strong property/data but moderate seller intent — held at WARM")
+        if tier == "WARM" and motivation_score < 45:
+            tier = "COOL"
+
+        # ── REVIEW tier (audit §13.3, Appendix H T01) ──────────────────────────
+        # A marketable property that lands in COOL/PASS *only* because seller-intent
+        # data is missing (not because of a verified disqualifier) should not be
+        # discarded. Route it to REVIEW so the agent enriches tenure/equity first.
+        tenure_unknown = not gsccca_connected
+        if (tier in ("PASS", "COOL")
+                and not hard_excluded
+                and fit_score >= 60
+                and tenure_unknown):
+            tier = "REVIEW"
+            data_quality_notes.append("Strong property fit but seller intent unknown — enrich tenure/equity before discarding")
+
         strategy = _strategy(flags, failures, tier)
 
         return {
@@ -563,9 +686,11 @@ class LeadEngine:
             "passes":           list(dict.fromkeys(passes)),
             "warnings":         list(dict.fromkeys(warnings)),
             "failures":                list(dict.fromkeys(failures)),
+            "priority_band":            _priority_band(tier),
             "estimated_conversion_pct": _conversion_pct(tier),
             "expected_gci_range":       _gci_range(tier),
             "data_quality_notes":       data_quality_notes,
+            "market_context":           market_context,
         }
 
 
@@ -595,6 +720,8 @@ def _tier(score: int) -> str:
 
 
 def _strategy(flags: list, failures: list, tier: str) -> str:
+    if tier == "REVIEW":
+        return "Marketable home, intent unknown — verify tenure/equity, then re-score"
     if tier == "PASS":
         if "Outside North Fulton or Forsyth County" in failures:
             return "Outside target area"
@@ -628,21 +755,41 @@ def _strategy(flags: list, failures: list, tier: str) -> str:
     return "Nurture — monitor for motivation signals"
 
 
-def _conversion_pct(tier: str) -> str:
-    """Estimated listing-agreement conversion rate by tier (North Fulton / Forsyth baseline)."""
+def _priority_band(tier: str) -> str:
+    """Relative work-priority label (audit §4.2: use relative priority, not implied
+    conversion %, until real outreach outcomes are logged)."""
     return {
-        "HOT":  "15–25%",
-        "WARM": "8–15%",
-        "COOL": "3–8%",
-        "PASS": "<1%",
+        "HOT":    "P1 — work first",
+        "WARM":   "P2 — work this week",
+        "COOL":   "P3 — nurture queue",
+        "REVIEW": "P2-hold — enrich data first",
+        "PASS":   "P4 — excluded",
+    }.get(tier, "unknown")
+
+
+def _conversion_pct(tier: str) -> str:
+    """RELATIVE listing-conversion likelihood by tier.
+
+    Audit §4.2 / §7 (P2): the prior absolute ranges (HOT 15–25%) are unrealistic for
+    cold outbound and unvalidated. These are ordinal expectations to be replaced with
+    measured precision@K once outreach outcomes are logged — NOT promised rates.
+    """
+    return {
+        "HOT":    "Highest relative likelihood",
+        "WARM":   "Moderate relative likelihood",
+        "COOL":   "Lower — nurture",
+        "REVIEW": "Unknown until enriched",
+        "PASS":   "Excluded",
     }.get(tier, "unknown")
 
 
 def _gci_range(tier: str) -> str:
-    """Expected GCI per lead worked, based on ~$875K avg list price × 2.5% listing commission."""
+    """Illustrative GCI per converted listing (~$875K avg list × 2.5% side).
+    Shown as opportunity size, not a forecast — conversion probability is unvalidated."""
     return {
-        "HOT":  "$3,300–$5,500 expected GCI",
-        "WARM": "$1,750–$3,300 expected GCI",
-        "COOL": "$660–$1,750 expected GCI",
-        "PASS": "$0 — below outreach threshold",
+        "HOT":    "~$21,900 GCI per signed listing (illustrative)",
+        "WARM":   "~$21,900 GCI per signed listing (illustrative)",
+        "COOL":   "~$21,900 GCI per signed listing (illustrative)",
+        "REVIEW": "Size after data enrichment",
+        "PASS":   "Below outreach threshold",
     }.get(tier, "")

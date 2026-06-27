@@ -74,16 +74,22 @@ class FMLSClient:
     ]
 
     # Segment mix for demo realism
+    # Market-realistic distribution (audit §18.3). A real North Fulton / Forsyth
+    # scan is dominated by ordinary owner-occupants, NOT distressed/absentee leads.
+    # Motivated archetypes are a deliberate minority so HOT stays a meaningful tier;
+    # the bulk are owner-occupants, with a lifecycle subset (long tenure / senior /
+    # equity) representing the normal move-up & downsizer sellers a Realtor actually wins.
     _PROFILES = {
-        'hot_primary':   0.13,  # out-of-state + 10 yrs → HOT
-        'hot_multi':     0.06,  # out-of-state + delinquent → HOT
-        'warm_tax':      0.09,  # tax delinquent → WARM
-        'warm_probate':  0.07,  # probate → WARM
-        'warm_instate':  0.11,  # in-state absentee → WARM
-        'warm_mompop':   0.09,  # mom-and-pop → WARM
-        'cool_absentee': 0.15,  # newer absentee < 10 yrs → COOL
-        'corporate':     0.08,  # LLC / Inc → PASS
-        'owner_occ':     0.22,  # owner-occupied → PASS
+        'hot_primary':   0.05,  # out-of-state + long tenure + equity → HOT
+        'hot_multi':     0.03,  # out-of-state + distress → HOT
+        'warm_probate':  0.05,  # estate / probate → HOT/WARM
+        'warm_tax':      0.05,  # tax delinquent → WARM
+        'warm_instate':  0.07,  # in-state absentee → WARM
+        'warm_mompop':   0.05,  # mom-and-pop landlord → WARM
+        'cool_absentee': 0.10,  # newer absentee < 10 yrs → COOL
+        'lifecycle_occ': 0.13,  # long-tenure homestead family/senior → WARM/HOT (normal seller)
+        'owner_occ':     0.41,  # ordinary owner-occupant → COOL / REVIEW / PASS (the majority)
+        'corporate':     0.09,  # LLC / Inc → PASS (institutional) or small-entity
     }
 
     def __init__(self, api_key='', username='', password=''):
@@ -101,20 +107,49 @@ class FMLSClient:
 
     # ── Live API ─────────────────────────────────────────────────────────────
 
+    # Per-submarket price ceiling (audit §6.3 / §7 P1): a flat $2M cap excludes
+    # legitimate high-GCI Milton / Alpharetta / Johns Creek luxury listings.
+    # Override via config.FMLS_PRICE_CEILING (single int) if the agent's strategy differs.
+    _CITY_PRICE_CEILING = {
+        'Milton':        4_000_000,
+        'Alpharetta':    2_800_000,
+        'Johns Creek':   2_800_000,
+        'Sandy Springs': 2_500_000,
+        'Roswell':       2_000_000,
+    }
+    _DEFAULT_PRICE_CEILING = 2_500_000
+
     def _live_data(self, county: str) -> list:
         token   = self._get_token()
         headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
 
         county_code = 'Fulton' if county == 'North Fulton' else county
+
+        # Restrict the Fulton query to the five North Fulton target cities so we
+        # don't scan (and later cap) the entire county. Forsyth stays county-wide.
+        import config as _cfg
+        override_ceiling = getattr(_cfg, "FMLS_PRICE_CEILING", None)
+        if county == 'North Fulton':
+            ceiling = override_ceiling or max(self._CITY_PRICE_CEILING.values())
+            city_clause = " or ".join(f"City eq '{c}'" for c in self._FULTON_CITIES)
+            geo_clause = f"CountyOrParish eq 'Fulton' and ({city_clause})"
+        else:
+            ceiling = override_ceiling or self._DEFAULT_PRICE_CEILING
+            geo_clause = f"CountyOrParish eq '{county_code}'"
+
+        # Skip Registered listings (FMLS Rule 3.1 — not co-op distributable);
+        # include Active and ComingSoon (DOM hasn't accrued — highest priority).
+        status_clause = "(StandardStatus eq 'Active' or StandardStatus eq 'Coming Soon')"
+
         odata_filter = (
-            f"CountyOrParish eq '{county_code}' and "
-            f"ListPrice ge 200000 and ListPrice le 2000000"
+            f"{geo_clause} and {status_clause} and "
+            f"ListPrice ge 200000 and ListPrice le {int(ceiling)}"
         )
         select = ','.join([
             'ListingId','ListPrice','StreetNumber','StreetName','StreetSuffix',
             'City','PostalCode','CountyOrParish','PropertyType','PropertySubType',
             'YearBuilt','ListingContractDate','OwnerName','TaxAnnualAmount',
-            'BedroomsTotal',
+            'BedroomsTotal','StandardStatus',
         ])
 
         url = (f"{self.BASE_URL}/Property"
@@ -140,6 +175,7 @@ class FMLSClient:
             'state':                   'GA',
             'zip_code':                raw.get('PostalCode', ''),
             'property_type':           raw.get('PropertySubType') or raw.get('PropertyType', 'Single Family'),
+            'listing_status':          raw.get('StandardStatus', ''),
             'year_built':              raw.get('YearBuilt'),
             'assessed_value':          raw.get('ListPrice', 0),
             'bedrooms':                raw.get('BedroomsTotal', 0),
@@ -149,11 +185,17 @@ class FMLSClient:
             'owner_state':             'GA',
             'is_out_of_state_absentee': False,
             'is_in_state_absentee':    False,
-            'years_owned':             0,
+            # P0 (audit §1.2): live FMLS does NOT prove owner tenure or equity.
+            # Encode unknowns as None — NOT 0 — so the engine lowers confidence
+            # instead of firing the -18 short-tenure penalty on every live lead.
+            'years_owned':             None,
+            'tenure_verified':         False,
+            'tenure_source':           None,
             'tax_delinquent':          False,
             'foreclosure':             False,
             'free_and_clear':          False,
-            'estimated_equity_pct':    0,
+            'estimated_equity_pct':    None,
+            'equity_source':           None,
             'total_properties_owned':  1,
             'homestead_exemption':     False,
             'senior_exemption':        False,
@@ -379,13 +421,36 @@ class FMLSClient:
             base['owner_name'] = f"{rng.choice(self._LAST).upper()}{sfx}"
             base['homestead_exemption'] = False
 
-        elif profile == 'owner_occ':
-            mort_yr = rng.choice([2017, 2018, 2019, 2020, 2020, 2021, 2021, 2022, 2023, 2024])
+        elif profile == 'lifecycle_occ':
+            # The normal owner-occupant seller (audit §4.1/§6.6): long-tenure family
+            # or senior with real equity, entering a move-up / downsize window. This
+            # is the bulk of a Realtor's actual listing business — should rank WARM/HOT.
+            yrs = rng.randint(12, 28)
+            senior = rng.random() < 0.35
             base.update({
                 'homestead_exemption': True,
-                'years_owned':         max(1, 2026 - mort_yr + rng.randint(0, 2)),
+                'years_owned':         yrs,
+                'mortgage_year':       None if rng.random() < 0.4 else rng.randint(2002, 2014),
+                'estimated_equity_pct': rng.randint(45, 88),
+                'free_and_clear':      yrs >= 22 and rng.random() < 0.5,
+                'senior_exemption':    senior,
+                'bedrooms':            rng.randint(3, 5),
+                'year_built':          rng.randint(1995, 2016),
+                'vacancy':             False,
+            })
+
+        elif profile == 'owner_occ':
+            # Ordinary owner-occupant, recent-to-mid tenure, modest equity, no
+            # transition signal. Most should land COOL / REVIEW / PASS. ~30% have
+            # unknown tenure (None) to exercise the missing-data path realistically.
+            mort_yr = rng.choice([2017, 2018, 2019, 2020, 2020, 2021, 2021, 2022, 2023, 2024])
+            yrs = max(1, 2026 - mort_yr + rng.randint(0, 2))
+            base.update({
+                'homestead_exemption': True,
+                'years_owned':         None if rng.random() < 0.30 else yrs,
                 'mortgage_year':       mort_yr,
-                'senior_exemption':    rng.random() < 0.12,
+                'estimated_equity_pct': rng.randint(8, 35),
+                'senior_exemption':    rng.random() < 0.08,
                 'vacancy':             False,
             })
 

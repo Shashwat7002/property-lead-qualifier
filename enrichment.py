@@ -62,6 +62,12 @@ CITY_COORDS = {
     "vickery creek": (34.1700, -84.1800),
 }
 
+# County-specific FHFA all-transactions HPI series (annual).
+HPI_SERIES = {
+    "fulton":  "ATNHPIUS13121A",
+    "forsyth": "ATNHPIUS13117A",
+}
+
 FRED_BASE     = "https://api.stlouisfed.org/fred/series/observations"
 CENSUS_GEO    = "https://geocoding.geo.census.gov/geocoder/geographies/address"
 CENSUS_ACS    = "https://api.census.gov/data/2023/acs/acs5"
@@ -76,7 +82,7 @@ class Enricher:
                  gsccca_username: str = "", gsccca_password: str = ""):
         self.fred_key    = fred_key.strip()
         self.census_key  = census_key.strip()
-        self._fred_ctx   = {}        # populated once per scan
+        self._fred_ctx   = {"hpi_growth_by_county": {}}  # populated once per scan
         self._geo_cache  = {}        # address hash → (lat, lng, tract_geoid)
         self._tract_cache = {}       # tract_geoid → census dict
         self._osm_cache  = {}        # (rounded_lat, rounded_lng) → osm dict
@@ -118,14 +124,19 @@ class Enricher:
                 self._fred_ctx["unemployment"] = float(obs["value"])
                 break
 
-        # Fulton County HPI — compute 12-month YoY growth
-        recent = _fetch("ATNHPIUS13121A", limit=14)
-        vals = [o for o in recent if o["value"] != "."]
-        if len(vals) >= 13:
-            curr = float(vals[0]["value"])
-            prev = float(vals[12]["value"])
-            if prev:
-                self._fred_ctx["hpi_growth"] = (curr - prev) / prev
+        # County HPI — FHFA all-transactions index, ANNUAL series.
+        # P0 (audit §6.12/§7.2): previous code used Fulton series for both counties
+        # and compared vals[0] to vals[12] — a 12-YEAR gap, not one year. Correct YoY
+        # compares the latest annual observation to the immediately prior one.
+        # Series: Forsyth=ATNHPIUS13117A, Fulton=ATNHPIUS13121A.
+        for county_key, series_id in HPI_SERIES.items():
+            recent = _fetch(series_id, limit=3)
+            vals = [o for o in recent if o["value"] != "."]
+            if len(vals) >= 2:
+                curr = float(vals[0]["value"])
+                prev = float(vals[1]["value"])
+                if prev:
+                    self._fred_ctx["hpi_growth_by_county"][county_key] = (curr - prev) / prev
 
     def enrich_batch(self, props: list) -> list:
         """
@@ -177,8 +188,9 @@ class Enricher:
             return   # bad credentials or network error — degrade silently
 
         for prop in props:
-            # Skip when the upstream already populated years_owned (e.g. demo data)
-            if prop.get("years_owned", 0) > 0:
+            # Skip when the upstream already populated years_owned (e.g. demo data).
+            # Use (... or 0) so a None (unknown tenure) does not raise on comparison.
+            if (prop.get("years_owned") or 0) > 0:
                 continue
 
             owner_name = (prop.get("owner_name") or "").strip()
@@ -189,6 +201,9 @@ class Enricher:
             result = self.gsccca.lookup_deed(owner_name, county)
             if result:
                 prop.update(result)
+                if result.get("years_owned") is not None:
+                    prop["tenure_verified"] = True
+                    prop["tenure_source"]   = "gsccca"
 
             time.sleep(0.5)   # ~2 req/sec to stay polite with GSCCCA servers
 
@@ -209,8 +224,12 @@ class Enricher:
             prop["fred_mortgage_rate"]    = self._fred_ctx["mortgage_rate"]
         if self._fred_ctx.get("unemployment") is not None:
             prop["fred_unemployment_rate"] = self._fred_ctx["unemployment"]
-        if self._fred_ctx.get("hpi_growth") is not None:
-            prop["fred_hpi_growth"]        = self._fred_ctx["hpi_growth"]
+        # County-specific HPI growth (Forsyth vs Fulton appreciate differently).
+        by_county = self._fred_ctx.get("hpi_growth_by_county", {})
+        county    = (prop.get("county") or "").lower()
+        county_key = "forsyth" if "forsyth" in county else "fulton" if "fulton" in county else None
+        if county_key and by_county.get(county_key) is not None:
+            prop["fred_hpi_growth"] = by_county[county_key]
 
     # ── Geo enrichment ────────────────────────────────────────────────────────
 

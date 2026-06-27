@@ -78,9 +78,10 @@ def scan():
 
         stats = {
             "total_scanned": total_scanned,
-            "hot":  sum(1 for l in leads if l["tier"] == "HOT"),
-            "warm": sum(1 for l in leads if l["tier"] == "WARM"),
-            "cool": sum(1 for l in leads if l["tier"] == "COOL"),
+            "hot":    sum(1 for l in leads if l["tier"] == "HOT"),
+            "warm":   sum(1 for l in leads if l["tier"] == "WARM"),
+            "cool":   sum(1 for l in leads if l["tier"] == "COOL"),
+            "review": sum(1 for l in leads if l["tier"] == "REVIEW"),
         }
 
         return jsonify({
@@ -105,8 +106,9 @@ def export_csv():
         return jsonify({"error": "No leads to export."}), 400
 
     fieldnames = [
-        "Rank", "Score", "Tier", "Strategy",
+        "Rank", "Score", "Tier", "PriorityBand", "Strategy",
         "MotivationScore", "FitScore", "ConfidenceScore",
+        "RelativeConversion", "OpportunitySize",
         "Address", "City", "County", "ZipCode", "State",
         "PropertyType", "YearBuilt", "Bedrooms", "AssessedValue",
         "OwnerName", "OwnerMailingAddress", "OwnerCity", "OwnerState",
@@ -129,10 +131,13 @@ def export_csv():
             "Rank":                 rank,
             "Score":                lead.get("score", ""),
             "Tier":                 lead.get("tier", ""),
+            "PriorityBand":         lead.get("priority_band", ""),
             "Strategy":             lead.get("strategy", ""),
             "MotivationScore":      lead.get("motivation_score", ""),
             "FitScore":             lead.get("fit_score", ""),
             "ConfidenceScore":      lead.get("confidence_score", ""),
+            "RelativeConversion":   lead.get("estimated_conversion_pct", ""),
+            "OpportunitySize":      lead.get("expected_gci_range", ""),
             "Address":              lead.get("address", ""),
             "City":                 lead.get("city", ""),
             "County":               lead.get("county", ""),
@@ -180,27 +185,41 @@ def export_csv():
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
     if request.method == "GET":
+        # P0 (audit §7.3): never echo secrets back to the frontend. Return only
+        # whether each secret is set, plus non-secret identifiers (username, demo).
+        def _is_set(v) -> bool:
+            return bool((v or "").strip())
+
         return jsonify({
-            "api_key":          cfg.FMLS_API_KEY,
-            "username":         cfg.FMLS_USERNAME,
-            "demo_mode":        cfg.DEMO_MODE,
-            "fred_api_key":     getattr(cfg, "FRED_API_KEY",     ""),
-            "census_api_key":   getattr(cfg, "CENSUS_API_KEY",   ""),
-            "gsccca_username":  getattr(cfg, "GSCCCA_USERNAME",  ""),
-            "gsccca_password":  getattr(cfg, "GSCCCA_PASSWORD",  ""),
+            "username":             cfg.FMLS_USERNAME,
+            "demo_mode":            cfg.DEMO_MODE,
+            "gsccca_username":      getattr(cfg, "GSCCCA_USERNAME", ""),
+            # Booleans only — the actual values stay server-side.
+            "api_key_set":          _is_set(cfg.FMLS_API_KEY),
+            "password_set":         _is_set(getattr(cfg, "FMLS_PASSWORD", "")),
+            "fred_api_key_set":     _is_set(getattr(cfg, "FRED_API_KEY", "")),
+            "census_api_key_set":   _is_set(getattr(cfg, "CENSUS_API_KEY", "")),
+            "gsccca_password_set":  _is_set(getattr(cfg, "GSCCCA_PASSWORD", "")),
         })
 
     data      = request.json or {}
     cfg_path  = os.path.join(os.path.dirname(__file__), "config.py")
 
-    api_key          = data.get("api_key",          "").strip()
+    # Blank secret fields mean "leave unchanged" (the GET no longer pre-fills them),
+    # so fall back to the currently stored value instead of wiping it.
+    def _keep(submitted, current):
+        s = (submitted or "").strip()
+        return s if s else (current or "")
+
     username         = data.get("username",          "").strip()
-    password         = data.get("password",          "").strip()
     demo_mode        = bool(data.get("demo_mode",    True))
-    fred_api_key     = data.get("fred_api_key",     "").strip()
-    census_api_key   = data.get("census_api_key",   "").strip()
     gsccca_username  = data.get("gsccca_username",  "").strip()
-    gsccca_password  = data.get("gsccca_password",  "").strip()
+
+    api_key          = _keep(data.get("api_key"),         cfg.FMLS_API_KEY)
+    password         = _keep(data.get("password"),        getattr(cfg, "FMLS_PASSWORD", ""))
+    fred_api_key     = _keep(data.get("fred_api_key"),    getattr(cfg, "FRED_API_KEY", ""))
+    census_api_key   = _keep(data.get("census_api_key"),  getattr(cfg, "CENSUS_API_KEY", ""))
+    gsccca_password  = _keep(data.get("gsccca_password"), getattr(cfg, "GSCCCA_PASSWORD", ""))
 
     with open(cfg_path, "w") as f:
         f.write("# Sprint Lead Generation — Configuration\n")
@@ -267,9 +286,11 @@ def _serialize_lead(lead: dict) -> dict:
         "passes":                   lead.get("passes", []),
         "warnings":                 lead.get("warnings", []),
         "failures":                 lead.get("failures", []),
+        "priority_band":            lead.get("priority_band", ""),
         "estimated_conversion_pct": lead.get("estimated_conversion_pct", ""),
         "expected_gci_range":       lead.get("expected_gci_range", ""),
         "data_quality_notes":       lead.get("data_quality_notes", []),
+        "market_context":           lead.get("market_context", []),
         # Enrichment
         "school_performance_score": lead.get("school_performance_score"),
         "fred_mortgage_rate":       lead.get("fred_mortgage_rate"),
