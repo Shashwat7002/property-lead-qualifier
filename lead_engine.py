@@ -92,6 +92,9 @@ SUBMARKET_CEILINGS = {
 # Halcyon / GA-400) behaves very differently from rural outer Forsyth. The audit
 # (§6.1, Appendix C) flags that scoring all Forsyth identically hides the best leads.
 SOUTH_FORSYTH_ZIPS = {"30005", "30024", "30040", "30041"}
+# Outer/rural Forsyth (north of Cumming) — slower DOM, weaker buyer demand than the
+# South Forsyth / GA-400 corridor. Realtor.com mid-2026: 30028 ~71 DOM vs 30040/41 ~40.
+OUTER_FORSYTH_ZIPS = {"30028"}
 
 POSITIVE_MOTIVATION_FLAGS = {
     "Out-of-state absentee", "In-state absentee",
@@ -105,8 +108,67 @@ POSITIVE_MOTIVATION_FLAGS = {
     "Homestead move-up window — equity-rich family owner-occupant",
 }
 
+# ── HOT evidence gate (independent seller-intent corroboration) ─────────────────
+# A lead reaches HOT only if it has INDEPENDENT motivation evidence, not just a high
+# score from equity (capacity, not intent) plus marketability. Three buckets:
+#   URGENT    — time-pressured / distress / absentee (a single one is strong)
+#   LIFECYCLE — owner is in a transition window (downsize, move-up, school stage)
+#   FINANCIAL — owner CAN sell easily (equity, free-and-clear). Capacity, not intent.
+# Equity×lifecycle interaction flags are classified LIFECYCLE because they represent
+# equity confirmation PAIRED with a life-stage signal — the reviewer's accepted
+# corroborator for a normal owner-occupant seller.
+URGENT_SIGNALS = {
+    "Probate, trust, or estate signal",
+    "Verified tax or foreclosure distress",
+    "Property-level vacancy indicator",
+    "Out-of-state absentee",
+    "In-state absentee",
+    "Ownership transfer anomaly",
+}
+LIFECYCLE_SIGNALS = {
+    "Empty-nest probability",
+    "School-stage lifecycle",
+    "Senior exemption lifecycle signal",
+    "Upgrade seller — move-up listing candidate",
+    "Homestead downsizer window — long-tenure owner-occupant",
+    "Homestead move-up window — equity-rich family owner-occupant",
+    "Forsyth senior downsizer — long tenure + full school-tax exemption",
+    "Equity-backed family lifecycle seller",
+    "Equity-backed senior downsizer",
+    "Equity-rich absentee exit candidate",
+}
+FINANCIAL_SIGNALS = {
+    "Free and clear",
+    "High-equity owner",
+    "Meaningful equity estimate",
+}
+
+
+def _hot_evidence_ok(flags) -> bool:
+    """True if the lead has enough independent seller-intent evidence to be HOT.
+    High equity alone (financial only) or long tenure alone (lifecycle only) is NOT
+    enough — the reviewer's core correction."""
+    f = set(flags)
+    urgent    = len(f & URGENT_SIGNALS)
+    lifecycle = len(f & LIFECYCLE_SIGNALS)
+    financial = len(f & FINANCIAL_SIGNALS)
+    return (
+        urgent >= 2                                  # e.g. probate + vacancy
+        or (urgent >= 1 and (lifecycle + financial) >= 1)  # distress + equity, absentee + downsizer
+        or (lifecycle >= 1 and financial >= 1)       # empty-nest + equity (equity-confirmed lifecycle)
+    )
+
 
 class LeadEngine:
+
+    def __init__(self, listing_goal: str = "seller_listing"):
+        # "seller_listing" → prospecting owners to sign a LISTING agreement. NAR Code
+        #   of Ethics Article 16 / SOP 16-4: do not solicit owners already exclusively
+        #   listed with another broker. Active & Coming Soon FMLS records are therefore
+        #   routed to COMPLIANCE_HOLD (use for comps / market intel only, not outreach).
+        # "buyer_or_market" → buyer-side or market-intelligence use, where Active /
+        #   Coming Soon inventory is legitimate to score.
+        self.listing_goal = listing_goal
 
     def score_lead(self, prop: dict) -> dict:
         result = dict(prop)
@@ -144,6 +206,13 @@ class LeadEngine:
         mortgage_year    = prop.get("mortgage_year")
         school_score     = prop.get("school_performance_score")
         transfer_type    = (prop.get("transfer_type") or "").lower()
+
+        # Contactability inputs (usually absent until skip-traced — treat unknown as
+        # NEUTRAL, never as uncontactable).
+        phone            = (prop.get("phone") or "").strip()
+        email            = (prop.get("email") or "").strip()
+        do_not_call      = bool(prop.get("do_not_call"))
+        mailing_verified = bool(prop.get("owner_mailing_address"))
 
         # ── Scorer state ─────────────────────────────────────────────────────
         motivation_raw = 0
@@ -188,7 +257,17 @@ class LeadEngine:
         in_target_city  = city in NORTH_FULTON_CITIES
 
         if is_forsyth:
-            apply(12, "Forsyth County target area", "fit", "pass")
+            # Forsyth is not monolithic: the South Forsyth / GA-400 corridor is a
+            # high-demand newer-family submarket; outer/rural north Forsyth is slower.
+            if zip_code in SOUTH_FORSYTH_ZIPS:
+                apply(12, "South Forsyth core — high-demand target submarket", "fit", "pass")
+            elif zip_code in OUTER_FORSYTH_ZIPS:
+                apply(6, "Outer Forsyth — target county, slower submarket", "fit", "pass")
+                market_context.append("Outer/rural Forsyth ZIP — longer DOM; require stronger price, school, or lifecycle support")
+            elif zip_code:
+                apply(9, "Forsyth County target area", "fit", "pass")
+            else:
+                apply(9, "Forsyth County target area (ZIP unknown)", "fit", "pass")
             apply(2, "Forsyth County — precise geography", "confidence", "pass")
         elif (is_fulton or not county) and in_target_city:
             apply(12, "North Fulton target city", "fit", "pass")
@@ -213,8 +292,11 @@ class LeadEngine:
             apply(-4, "Unclear property type", "fit", "warning")
 
         # ── Ownership tenure ─────────────────────────────────────────────────
+        # A TRUSTEE'S DEED / gift moving a long-held home into a revocable trust is NOT
+        # an arm's-length recent purchase — it must not trigger the recent-sale penalty.
         is_life_event_transfer = bool(re.search(
-            r"quit.?claim|estate|inherited|inheritance|divorce|sheriff|relocation|non.?arm|family transfer",
+            r"quit.?claim|estate|inherited|inheritance|divorce|sheriff|relocation|"
+            r"non.?arm|family transfer|trust transfer|gift|deed of gift",
             transfer_type,
         ))
         if gsccca_connected:
@@ -297,7 +379,9 @@ class LeadEngine:
                 elif total_props > 5:
                     apply(2, "Small multi-property entity", "motivation", "pass")
         else:
-            apply(3, "Natural person owner", "motivation", "pass")
+            # Natural-person ownership is ELIGIBILITY, not seller intent — no motivation
+            # points (reviewer fix). Landlord scale IS an intent signal, so it stays.
+            passes.append("Natural person individual owner")
             if 2 <= total_props <= 5:
                 apply(8, "Mom-and-Pop landlord", "motivation", "flag")
             elif total_props > 5:
@@ -309,9 +393,12 @@ class LeadEngine:
         elif is_instate:
             apply(6, "In-state absentee", "motivation", "flag")
         elif years_owned >= 15:
+            # Long owner-occupied tenure is a mild intent signal (closer to a life
+            # transition); kept modest, and cannot reach HOT without the evidence gate.
             apply(4, "Owner-occupied with long tenure", "motivation", "pass")
         else:
-            apply(1, "Owner-occupied or same-address owner", "motivation", "pass")
+            # Same-address occupancy is context, not intent — no motivation points.
+            passes.append("Owner-occupied (same-address owner)")
 
         # ── Homestead exemption ───────────────────────────────────────────────
         # Audit §6.6 (the most important Realtor-specific fix): most retail listings
@@ -361,16 +448,15 @@ class LeadEngine:
         elif is_fulton and senior_exemption:
             market_context.append("Fulton senior school-tax exemption is income-limited — higher carrying cost than Forsyth; useful net-sheet talking point")
 
-        # South Forsyth micro-market: the high-demand newer family corridor.
+        # South Forsyth micro-market context (geography block already scored the ZIP tier).
         if is_forsyth and zip_code in SOUTH_FORSYTH_ZIPS:
-            apply(2, "South Forsyth corridor — high-demand newer family submarket", "fit", "pass", True)
-        elif is_forsyth and zip_code and zip_code not in SOUTH_FORSYTH_ZIPS:
-            market_context.append("Outer/rural Forsyth ZIP — verify school cluster and DOM; not South Forsyth demand profile")
+            market_context.append("South Forsyth / GA-400 corridor — newer, school-sensitive family demand")
 
         # ── FMLS listing status (Coming Soon = day-one priority) ───────────────
-        # Coming Soon listings don't accrue DOM yet (FMLS Rule). Audit/design report:
-        # prioritize them so the agent is ready on day one of the active window.
-        if "coming soon" in listing_status:
+        # Coming Soon listings don't accrue DOM yet (FMLS Rule). Only relevant for
+        # BUYER-side / market use — in seller-listing mode these owners are already
+        # represented (see COMPLIANCE_HOLD), so we do not score them as outreach targets.
+        if self.listing_goal != "seller_listing" and "coming soon" in listing_status:
             apply(2, "Coming Soon listing — engage before active window opens", "fit", "flag", True)
             market_context.append("Coming Soon status — DOM not yet accruing; prioritize day-one outreach")
 
@@ -379,17 +465,31 @@ class LeadEngine:
             apply(8, "Property-level vacancy indicator", "motivation", "flag")
 
         # ── Equity / free-and-clear ───────────────────────────────────────────
+        # Equity is CAPACITY to sell, not INTENT to sell (reviewer's key correction).
+        # In high-appreciation North Fulton / Forsyth, most owners are equity-rich
+        # simply because the market rose. So standalone equity weights are reduced,
+        # and the real motivation comes from equity PAIRED with a transition signal.
+        high_equity = free_and_clear or (equity_ratio is not None and equity_ratio >= 0.6)
         if free_and_clear:
-            apply(15, "Free and clear", "motivation", "flag")
+            apply(10, "Free and clear", "motivation", "flag")
         elif equity_ratio is not None:
             if equity_ratio >= 0.6:
-                apply(15, "High-equity owner", "motivation", "flag")
+                apply(8, "High-equity owner", "motivation", "flag")
             elif equity_ratio >= 0.4:
-                apply(10, "Meaningful equity estimate", "motivation", "pass")
+                apply(6, "Meaningful equity estimate", "motivation", "pass")
             elif equity_ratio >= 0.2:
-                apply(4, "Moderate equity estimate", "motivation", "pass")
+                apply(3, "Moderate equity estimate", "motivation", "pass")
             else:
                 apply(-2, "Low estimated equity", "motivation", "failure")
+
+        # Equity × transition interactions — this is where equity becomes real intent.
+        # These are LIFECYCLE-class flags for the HOT evidence gate (equity-confirmed).
+        if high_equity and gsccca_connected and years_owned >= 10 and bedrooms >= 4:
+            apply(5, "Equity-backed family lifecycle seller", "motivation", "flag")
+        if high_equity and senior_exemption:
+            apply(6, "Equity-backed senior downsizer", "motivation", "flag")
+        if high_equity and (is_oos or is_instate):
+            apply(6, "Equity-rich absentee exit candidate", "motivation", "flag")
 
         # ── Ownership transfer anomaly ────────────────────────────────────────
         if re.search(r"quit.?claim|family transfer|non.?arm|trust transfer|divorce|sheriff|relocation", transfer_type):
@@ -644,33 +744,67 @@ class LeadEngine:
         #   raw  -18 → 10   |  4 → 37  |  12 → 52  |  18 → 63  |  30 → 81  |  50 → 95
         motivation_score = round(100 / (1 + math.exp(-0.076 * (motivation_raw - 11.1))))
         motivation_score = max(0, min(100, motivation_score))
-        fit_score        = max(0, min(100, round(45 + fit_raw * 2.1)))
+        # Fit is also LOGISTIC now (reviewer fix). The old linear 45 + fit_raw×2.1
+        # saturated at 100 for any ordinary target-market SFR (geography + SFR + build
+        # year alone ≈ raw 26), so "good" and "excellent" listings were indistinguishable.
+        # Logistic spreads them: raw 12→29, 20→50, 26→66, 32→79, 40→90.
+        fit_score        = round(100 / (1 + math.exp(-0.11 * (fit_raw - 20))))
+        fit_score        = max(0, min(100, fit_score))
         confidence_score = max(0, min(100, round(72 + confidence_raw * 4)))
         blended = motivation_score * 0.6 + fit_score * 0.25 + confidence_score * 0.15
         score   = max(0, min(100, min(round(blended), score_cap)))
 
-        # ── Tier gates (audit §13.3) ──────────────────────────────────────────
-        # A lead is HOT only if seller INTENT is genuinely high — not because a
-        # marketable property (fit) and complete data (confidence) carried a weak
-        # owner over the line. Likewise WARM needs at least moderate intent.
+        # ── Contactability (operational, not qualification) ───────────────────
+        # Unknown contact data is NEUTRAL (50), never "uncontactable" — most leads
+        # aren't skip-traced yet. Verified contact lifts operational priority; DNC
+        # sinks it. This adjusts ranking WITHOUT corrupting the qualification score.
+        contactability_score = 50
+        if phone:            contactability_score += 25
+        if email:            contactability_score += 15
+        if mailing_verified: contactability_score += 10
+        if do_not_call:      contactability_score -= 45
+        contactability_score = max(0, min(100, contactability_score))
+        contact_factor = 0.80 + 0.004 * contactability_score   # 0→0.80, 50→1.0, 100→1.20
+        operational_priority = round(score * contact_factor, 1)
+
+        # ── Tier assignment ───────────────────────────────────────────────────
         tier = _tier(score)
+
+        # HOT evidence gate (reviewer's central fix): HOT requires both a high
+        # motivation score AND independent corroborating intent signals. Equity alone
+        # or long tenure alone cannot manufacture HOT.
         if tier == "HOT" and motivation_score < 62:
             tier = "WARM"
-            warnings.append("Strong property/data but moderate seller intent — held at WARM")
+            warnings.append("Held at WARM — strong score but motivation score below HOT floor")
+        elif tier == "HOT" and not _hot_evidence_ok(flags):
+            tier = "WARM"
+            warnings.append("Held at WARM — high score but insufficient independent seller-intent evidence (e.g. equity alone)")
         if tier == "WARM" and motivation_score < 45:
             tier = "COOL"
 
-        # ── REVIEW tier (audit §13.3, Appendix H T01) ──────────────────────────
-        # A marketable property that lands in COOL/PASS *only* because seller-intent
-        # data is missing (not because of a verified disqualifier) should not be
-        # discarded. Route it to REVIEW so the agent enriches tenure/equity first.
+        # REVIEW tier (audit §13.3): marketable property whose seller intent is unknown
+        # only because data is missing — enrich rather than discard.
         tenure_unknown = not gsccca_connected
         if (tier in ("PASS", "COOL")
                 and not hard_excluded
-                and fit_score >= 60
+                and fit_score >= 55
                 and tenure_unknown):
             tier = "REVIEW"
             data_quality_notes.append("Strong property fit but seller intent unknown — enrich tenure/equity before discarding")
+
+        # Do-not-call is a hard operational ceiling regardless of qualification.
+        if do_not_call and tier in ("HOT", "WARM"):
+            tier = "COOL"
+            warnings.append("Owner on Do-Not-Call list — demoted; written/mail outreach only")
+
+        # COMPLIANCE_HOLD (NAR Article 16 / SOP 16-4): in seller-listing mode, an owner
+        # already represented (Active / Coming Soon on FMLS) must not be solicited for a
+        # listing. Overrides all other tiers — use for comps / market intel only.
+        is_listed_elsewhere = listing_status in ("active", "coming soon")
+        if self.listing_goal == "seller_listing" and is_listed_elsewhere:
+            tier = "COMPLIANCE_HOLD"
+            warnings.append("Already listed/Coming-Soon with a broker — NAR Article 16: do not solicit for listing")
+            market_context.append("Source record is an active MLS listing; appropriate for buyer-side or comp use only, not seller prospecting")
 
         strategy = _strategy(flags, failures, tier)
 
@@ -681,6 +815,8 @@ class LeadEngine:
             "motivation_score": motivation_score,
             "fit_score":        fit_score,
             "confidence_score": confidence_score,
+            "contactability_score":     contactability_score,
+            "operational_priority":     operational_priority,
             "strategy":         strategy,
             "flags":            list(dict.fromkeys(flags)),
             "passes":           list(dict.fromkeys(passes)),
@@ -691,6 +827,15 @@ class LeadEngine:
             "expected_gci_range":       _gci_range(tier),
             "data_quality_notes":       data_quality_notes,
             "market_context":           market_context,
+            # ── Debug / calibration export (raw components) ───────────────────
+            "motivation_raw":           motivation_raw,
+            "fit_raw":                  fit_raw,
+            "confidence_raw":           confidence_raw,
+            "score_cap_applied":        score_cap,
+            "hot_evidence_ok":          _hot_evidence_ok(flags),
+            "urgent_signal_count":      len(set(flags) & URGENT_SIGNALS),
+            "lifecycle_signal_count":   len(set(flags) & LIFECYCLE_SIGNALS),
+            "financial_signal_count":   len(set(flags) & FINANCIAL_SIGNALS),
         }
 
 
@@ -720,6 +865,8 @@ def _tier(score: int) -> str:
 
 
 def _strategy(flags: list, failures: list, tier: str) -> str:
+    if tier == "COMPLIANCE_HOLD":
+        return "Already listed with a broker — do NOT solicit (NAR Art. 16); comps / buyer-side only"
     if tier == "REVIEW":
         return "Marketable home, intent unknown — verify tenure/equity, then re-score"
     if tier == "PASS":
@@ -763,6 +910,7 @@ def _priority_band(tier: str) -> str:
         "WARM":   "P2 — work this week",
         "COOL":   "P3 — nurture queue",
         "REVIEW": "P2-hold — enrich data first",
+        "COMPLIANCE_HOLD": "Hold — do not solicit (Art. 16)",
         "PASS":   "P4 — excluded",
     }.get(tier, "unknown")
 
@@ -779,6 +927,7 @@ def _conversion_pct(tier: str) -> str:
         "WARM":   "Moderate relative likelihood",
         "COOL":   "Lower — nurture",
         "REVIEW": "Unknown until enriched",
+        "COMPLIANCE_HOLD": "Not applicable — do not solicit",
         "PASS":   "Excluded",
     }.get(tier, "unknown")
 
@@ -791,5 +940,6 @@ def _gci_range(tier: str) -> str:
         "WARM":   "~$21,900 GCI per signed listing (illustrative)",
         "COOL":   "~$21,900 GCI per signed listing (illustrative)",
         "REVIEW": "Size after data enrichment",
+        "COMPLIANCE_HOLD": "Not a listing-prospect record",
         "PASS":   "Below outreach threshold",
     }.get(tier, "")

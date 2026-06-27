@@ -13,15 +13,18 @@
     .tier-warm { background:#FEF3C7; color:#B45309; border-color:#FDE68A; }
     .tier-cool { background:#DBEAFE; color:#1D4ED8; border-color:#BFDBFE; }
     .tier-review { background:#EDE9FE; color:#6D28D9; border-color:#DDD6FE; }
+    .tier-hold { background:#F1F5F9; color:#475569; border-color:#E2E8F0; }
     .dot-hot  { background:#EF4444; }
     .dot-warm { background:#F59E0B; }
     .dot-cool { background:#3B82F6; }
     .dot-review { background:#8B5CF6; }
+    .dot-hold { background:#94A3B8; }
     .flag-pill { font-size:11px; padding:2px 8px; border-radius:999px; background:#F1F5F9; color:#475569; border:1px solid #E2E8F0; }
     .row-hot  { border-left:4px solid #EF4444; }
     .row-warm { border-left:4px solid #F59E0B; }
     .row-cool { border-left:4px solid #3B82F6; }
     .row-review { border-left:4px solid #8B5CF6; }
+    .row-hold { border-left:4px solid #94A3B8; }
     .fade-in  { animation: fadeIn .3s ease; }
     @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
     .spinner { border:3px solid #E2E8F0; border-top-color:#2563EB; border-radius:50%; width:22px; height:22px; animation:spin .7s linear infinite; display:inline-block; }
@@ -511,10 +514,11 @@
 
     tbody.innerHTML = filtered.map((lead, i) => {
       const t         = lead.tier;
-      const tierClass = { HOT:'tier-hot', WARM:'tier-warm', COOL:'tier-cool', REVIEW:'tier-review' }[t] || 'tier-cool';
-      const rowClass  = { HOT:'row-hot',  WARM:'row-warm',  COOL:'row-cool',  REVIEW:'row-review'  }[t] || '';
-      const dotClass  = { HOT:'dot-hot',  WARM:'dot-warm',  COOL:'dot-cool',  REVIEW:'dot-review'  }[t] || 'dot-cool';
-      const scoreColor = t === 'HOT' ? 'bg-red-100 text-red-700' : t === 'WARM' ? 'bg-amber-100 text-amber-700' : t === 'REVIEW' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700';
+      const tierClass = { HOT:'tier-hot', WARM:'tier-warm', COOL:'tier-cool', REVIEW:'tier-review', COMPLIANCE_HOLD:'tier-hold' }[t] || 'tier-cool';
+      const rowClass  = { HOT:'row-hot',  WARM:'row-warm',  COOL:'row-cool',  REVIEW:'row-review',  COMPLIANCE_HOLD:'row-hold'  }[t] || '';
+      const dotClass  = { HOT:'dot-hot',  WARM:'dot-warm',  COOL:'dot-cool',  REVIEW:'dot-review',  COMPLIANCE_HOLD:'dot-hold'  }[t] || 'dot-cool';
+      const tLabel    = t === 'COMPLIANCE_HOLD' ? 'HOLD' : t;
+      const scoreColor = t === 'HOT' ? 'bg-red-100 text-red-700' : t === 'WARM' ? 'bg-amber-100 text-amber-700' : t === 'REVIEW' ? 'bg-violet-100 text-violet-700' : t === 'COMPLIANCE_HOLD' ? 'bg-slate-100 text-slate-600' : 'bg-blue-100 text-blue-700';
 
       const flags = (lead.flags || []).slice(0, 2)
         .map(f => `<span class="flag-pill">${f}</span>`)
@@ -547,7 +551,7 @@
           </td>
           <td class="px-3 py-3.5 text-center">
             <span class="inline-flex items-center gap-1 border text-xs font-bold px-2.5 py-1 rounded-full ${tierClass}">
-              <span class="w-1.5 h-1.5 rounded-full ${dotClass}"></span>${t}
+              <span class="w-1.5 h-1.5 rounded-full ${dotClass}"></span>${tLabel}
             </span>
           </td>
           <td class="px-3 py-3.5">
@@ -579,9 +583,10 @@
     document.getElementById('detailTitle').textContent = l.address || 'Lead Details';
 
     const t         = l.tier;
-    const tierClass = { HOT:'tier-hot', WARM:'tier-warm', COOL:'tier-cool', REVIEW:'tier-review' }[t] || 'tier-cool';
-    const dotClass  = { HOT:'dot-hot',  WARM:'dot-warm',  COOL:'dot-cool',  REVIEW:'dot-review'  }[t] || 'dot-cool';
-    const scoreColor = t === 'HOT' ? 'bg-red-100 text-red-700' : t === 'WARM' ? 'bg-amber-100 text-amber-700' : t === 'REVIEW' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700';
+    const tLabel    = t === 'COMPLIANCE_HOLD' ? 'COMPLIANCE HOLD' : t;
+    const tierClass = { HOT:'tier-hot', WARM:'tier-warm', COOL:'tier-cool', REVIEW:'tier-review', COMPLIANCE_HOLD:'tier-hold' }[t] || 'tier-cool';
+    const dotClass  = { HOT:'dot-hot',  WARM:'dot-warm',  COOL:'dot-cool',  REVIEW:'dot-review',  COMPLIANCE_HOLD:'dot-hold'  }[t] || 'dot-cool';
+    const scoreColor = t === 'HOT' ? 'bg-red-100 text-red-700' : t === 'WARM' ? 'bg-amber-100 text-amber-700' : t === 'REVIEW' ? 'bg-violet-100 text-violet-700' : t === 'COMPLIANCE_HOLD' ? 'bg-slate-100 text-slate-600' : 'bg-blue-100 text-blue-700';
 
     // Sub-score bars
     const mScore = l.motivation_score || 0;
@@ -629,7 +634,7 @@
         </div>
         <div class="flex-1 min-w-0">
           <span class="inline-flex items-center gap-1.5 border text-sm font-bold px-3 py-1.5 rounded-full ${tierClass}">
-            <span class="w-2 h-2 rounded-full ${dotClass}"></span>${t} LEAD
+            <span class="w-2 h-2 rounded-full ${dotClass}"></span>${tLabel}${t === 'COMPLIANCE_HOLD' ? '' : ' LEAD'}
           </span>
           <p class="text-sm font-semibold text-slate-800 mt-1.5 leading-snug">${l.strategy || 'No strategy label'}</p>
         </div>

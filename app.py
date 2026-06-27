@@ -73,15 +73,19 @@ def scan():
             if scored["tier"] != "PASS":
                 raw_leads.append(scored)
 
-        raw_leads.sort(key=lambda x: x["score"], reverse=True)
+        # Rank by operational_priority (qualification score adjusted for contactability),
+        # falling back to raw score. Contactability is neutral when contact data is
+        # absent, so demo ordering is unchanged.
+        raw_leads.sort(key=lambda x: (x.get("operational_priority") or x["score"]), reverse=True)
         leads = [_serialize_lead(l) for l in raw_leads]
 
         stats = {
             "total_scanned": total_scanned,
-            "hot":    sum(1 for l in leads if l["tier"] == "HOT"),
-            "warm":   sum(1 for l in leads if l["tier"] == "WARM"),
-            "cool":   sum(1 for l in leads if l["tier"] == "COOL"),
-            "review": sum(1 for l in leads if l["tier"] == "REVIEW"),
+            "hot":        sum(1 for l in leads if l["tier"] == "HOT"),
+            "warm":       sum(1 for l in leads if l["tier"] == "WARM"),
+            "cool":       sum(1 for l in leads if l["tier"] == "COOL"),
+            "review":     sum(1 for l in leads if l["tier"] == "REVIEW"),
+            "compliance": sum(1 for l in leads if l["tier"] == "COMPLIANCE_HOLD"),
         }
 
         return jsonify({
@@ -106,8 +110,8 @@ def export_csv():
         return jsonify({"error": "No leads to export."}), 400
 
     fieldnames = [
-        "Rank", "Score", "Tier", "PriorityBand", "Strategy",
-        "MotivationScore", "FitScore", "ConfidenceScore",
+        "Rank", "Score", "OperationalPriority", "Tier", "PriorityBand", "Strategy",
+        "MotivationScore", "FitScore", "ConfidenceScore", "ContactabilityScore",
         "RelativeConversion", "OpportunitySize",
         "Address", "City", "County", "ZipCode", "State",
         "PropertyType", "YearBuilt", "Bedrooms", "AssessedValue",
@@ -130,12 +134,14 @@ def export_csv():
         writer.writerow({
             "Rank":                 rank,
             "Score":                lead.get("score", ""),
+            "OperationalPriority":  lead.get("operational_priority", ""),
             "Tier":                 lead.get("tier", ""),
             "PriorityBand":         lead.get("priority_band", ""),
             "Strategy":             lead.get("strategy", ""),
             "MotivationScore":      lead.get("motivation_score", ""),
             "FitScore":             lead.get("fit_score", ""),
             "ConfidenceScore":      lead.get("confidence_score", ""),
+            "ContactabilityScore":  lead.get("contactability_score", ""),
             "RelativeConversion":   lead.get("estimated_conversion_pct", ""),
             "OpportunitySize":      lead.get("expected_gci_range", ""),
             "Address":              lead.get("address", ""),
@@ -280,6 +286,8 @@ def _serialize_lead(lead: dict) -> dict:
         "motivation_score":         lead.get("motivation_score", 0),
         "fit_score":                lead.get("fit_score", 0),
         "confidence_score":         lead.get("confidence_score", 0),
+        "contactability_score":     lead.get("contactability_score", 50),
+        "operational_priority":     lead.get("operational_priority", lead.get("score", 0)),
         "strategy":                 lead.get("strategy", ""),
         # Signals
         "flags":                    lead.get("flags", []),
@@ -291,6 +299,14 @@ def _serialize_lead(lead: dict) -> dict:
         "expected_gci_range":       lead.get("expected_gci_range", ""),
         "data_quality_notes":       lead.get("data_quality_notes", []),
         "market_context":           lead.get("market_context", []),
+        # Debug / calibration (raw components)
+        "motivation_raw":           lead.get("motivation_raw"),
+        "fit_raw":                  lead.get("fit_raw"),
+        "confidence_raw":           lead.get("confidence_raw"),
+        "hot_evidence_ok":          lead.get("hot_evidence_ok"),
+        "urgent_signal_count":      lead.get("urgent_signal_count"),
+        "lifecycle_signal_count":   lead.get("lifecycle_signal_count"),
+        "financial_signal_count":   lead.get("financial_signal_count"),
         # Enrichment
         "school_performance_score": lead.get("school_performance_score"),
         "fred_mortgage_rate":       lead.get("fred_mortgage_rate"),
