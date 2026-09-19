@@ -18,6 +18,8 @@ from source_modes import SourceMode, ENGINE_GOAL
 import db
 
 app = Flask(__name__)
+from ml_lab.routes import ml_blueprint
+app.register_blueprint(ml_blueprint)
 # NOTE: the scoring engine is instantiated PER REQUEST in /api/scan with the correct
 # listing_goal for the chosen SourceMode — there is no shared global engine.
 

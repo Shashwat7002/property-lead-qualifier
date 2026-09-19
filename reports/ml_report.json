@@ -1,0 +1,494 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "name": "Ames Housing",
+    "rows": 2930,
+    "raw_rows": 2930,
+    "source_url": "https://jse.amstat.org/v19n3/decock/AmesHousing.txt",
+    "paper_url": "https://jse.amstat.org/v19n3/decock.pdf",
+    "sha256": "6cfe6cb525ba437de428653a1040e2aed7d696640bf75203786a6d7a0e67cfcc",
+    "canonical_sha256": "6cfe6cb525ba437de428653a1040e2aed7d696640bf75203786a6d7a0e67cfcc",
+    "canonical_source_verified": true,
+    "attribution": "Dean De Cock (2011), Ames, Iowa: Alternative to the Boston Housing Data as an End of Semester Regression Project, Journal of Statistics Education 19(3).",
+    "period": "2006\u20132010",
+    "location": "Ames, Iowa",
+    "currency": "historical USD",
+    "excluded_missing_targets": 0,
+    "missing_rows": 491,
+    "missing_cells": 491,
+    "unique_properties": 2930,
+    "duplicate_pid_rows": 0
+  },
+  "split": {
+    "train": 1758,
+    "calibration": 586,
+    "test": 586,
+    "seed": 42,
+    "strategy": "random rows; all PIDs unique",
+    "property_overlap": 0,
+    "index_sha256": {
+      "train": "b6140d27812ff55d7dbefd20ee5adfdf292d8bf7603b59106cc4ab4eacb53a25",
+      "calibration": "bb8ce222a613f9824a5274ad5731f824489006c64f452a92091756c9eaa4d653",
+      "test": "bbad54a0babee31120fb2f6e96480968af14ee89c094a28fdfbe4aa6bbc2cb58"
+    }
+  },
+  "features": [
+    {
+      "key": "lot_frontage",
+      "label": "Lot frontage",
+      "column": "Lot Frontage",
+      "unit": "ft",
+      "min": 0,
+      "max": 500,
+      "integer": false,
+      "default": 67.0,
+      "train_median": 67.0,
+      "missing_count": 490,
+      "missing_pct": 16.723549488054605,
+      "train_missing_count": 308,
+      "train_min": 21.0,
+      "train_max": 313.0,
+      "empty_training_feature": false
+    },
+    {
+      "key": "living_area",
+      "label": "Above-ground living area",
+      "column": "Gr Liv Area",
+      "unit": "sq ft",
+      "min": 100,
+      "max": 10000,
+      "integer": false,
+      "default": 1440.0,
+      "train_median": 1440.0,
+      "missing_count": 0,
+      "missing_pct": 0.0,
+      "train_missing_count": 0,
+      "train_min": 334.0,
+      "train_max": 5095.0,
+      "empty_training_feature": false
+    },
+    {
+      "key": "lot_area",
+      "label": "Lot area",
+      "column": "Lot Area",
+      "unit": "sq ft",
+      "min": 100,
+      "max": 500000,
+      "integer": false,
+      "default": 9350.0,
+      "train_median": 9350.0,
+      "missing_count": 0,
+      "missing_pct": 0.0,
+      "train_missing_count": 0,
+      "train_min": 1300.0,
+      "train_max": 215245.0,
+      "empty_training_feature": false
+    },
+    {
+      "key": "overall_quality",
+      "label": "Overall quality",
+      "column": "Overall Qual",
+      "unit": "1\u201310",
+      "min": 1,
+      "max": 10,
+      "integer": true,
+      "default": 6.0,
+      "train_median": 6.0,
+      "missing_count": 0,
+      "missing_pct": 0.0,
+      "train_missing_count": 0,
+      "train_min": 1.0,
+      "train_max": 10.0,
+      "empty_training_feature": false
+    },
+    {
+      "key": "year_built",
+      "label": "Year built",
+      "column": "Year Built",
+      "unit": "year",
+      "min": 1800,
+      "max": 2010,
+      "integer": true,
+      "default": 1972.0,
+      "train_median": 1972.0,
+      "missing_count": 0,
+      "missing_pct": 0.0,
+      "train_missing_count": 0,
+      "train_min": 1872.0,
+      "train_max": 2010.0,
+      "empty_training_feature": false
+    },
+    {
+      "key": "full_baths",
+      "label": "Full bathrooms",
+      "column": "Full Bath",
+      "unit": "count",
+      "min": 0,
+      "max": 6,
+      "integer": true,
+      "default": 2.0,
+      "train_median": 2.0,
+      "missing_count": 0,
+      "missing_pct": 0.0,
+      "train_missing_count": 0,
+      "train_min": 0.0,
+      "train_max": 4.0,
+      "empty_training_feature": false
+    },
+    {
+      "key": "bedrooms",
+      "label": "Above-ground bedrooms",
+      "column": "Bedroom AbvGr",
+      "unit": "count",
+      "min": 0,
+      "max": 12,
+      "integer": true,
+      "default": 3.0,
+      "train_median": 3.0,
+      "missing_count": 0,
+      "missing_pct": 0.0,
+      "train_missing_count": 0,
+      "train_min": 0.0,
+      "train_max": 8.0,
+      "empty_training_feature": false
+    },
+    {
+      "key": "garage_area",
+      "label": "Garage area",
+      "column": "Garage Area",
+      "unit": "sq ft",
+      "min": 0,
+      "max": 5000,
+      "integer": false,
+      "default": 480.0,
+      "train_median": 480.0,
+      "missing_count": 1,
+      "missing_pct": 0.034129692832764506,
+      "train_missing_count": 1,
+      "train_min": 0.0,
+      "train_max": 1488.0,
+      "empty_training_feature": false
+    }
+  ],
+  "models": [
+    {
+      "key": "median_baseline",
+      "label": "Training-median baseline",
+      "mae": 58677.129692832765,
+      "rmse": 85933.32277381577,
+      "r2": -0.08323107867043755,
+      "mae_ci": [
+        53798.96680887372,
+        63852.41962457338
+      ],
+      "test_rows": 586
+    },
+    {
+      "key": "ridge",
+      "label": "Ridge + median imputation",
+      "mae": 22990.712265533162,
+      "rmse": 33728.5264962405,
+      "r2": 0.8331244773574228,
+      "mae_ci": [
+        21071.393570666325,
+        25007.837052956987
+      ],
+      "test_rows": 586
+    }
+  ],
+  "paired_improvement": {
+    "label": "Baseline MAE minus Ridge MAE (positive favors Ridge)",
+    "value": 35686.4174272996,
+    "ci": [
+      31707.639991820906,
+      39651.58294669113
+    ]
+  },
+  "interval": {
+    "level": 0.9,
+    "half_width": 46923.90289449628,
+    "coverage": 0.9146757679180887,
+    "covered": 536,
+    "total": 586,
+    "coverage_ci": [
+      0.8892689317118815,
+      0.9346812886942754
+    ],
+    "calibration_rows": 586,
+    "calibration_rank": 529,
+    "method": "Split conformal; ceil((n_calibration + 1) \u00d7 0.90) absolute-residual order statistic"
+  },
+  "bootstrap": {
+    "samples": 2000,
+    "seed": 42,
+    "level": 0.95,
+    "method": "paired row-resampled percentile bootstrap; fitted models held fixed"
+  },
+  "model_config": {
+    "algorithm": "Ridge",
+    "alpha": 10.0,
+    "imputation": "training median + missingness indicators",
+    "scaling": "training mean and standard deviation",
+    "target": "SalePrice in historical dollars"
+  },
+  "software": {
+    "numpy": "2.5.3",
+    "scikit_learn": "1.9.1"
+  },
+  "examples": [
+    {
+      "id": "ames-1430",
+      "values": {
+        "lot_frontage": null,
+        "living_area": 1643.0,
+        "lot_area": 11500.0,
+        "overall_quality": 6.0,
+        "year_built": 1966.0,
+        "full_baths": 2.0,
+        "bedrooms": 2.0,
+        "garage_area": 438.0
+      },
+      "actual": 195000.0,
+      "predicted": 188716.14429330913,
+      "lower": 141792.24139881285,
+      "upper": 235640.0471878054
+    },
+    {
+      "id": "ames-212",
+      "values": {
+        "lot_frontage": 60.0,
+        "living_area": 1392.0,
+        "lot_area": 9900.0,
+        "overall_quality": 5.0,
+        "year_built": 1915.0,
+        "full_baths": 1.0,
+        "bedrooms": 3.0,
+        "garage_area": 0.0
+      },
+      "actual": 100000.0,
+      "predicted": 102955.2953649759,
+      "lower": 56031.39247047962,
+      "upper": 149879.19825947218
+    },
+    {
+      "id": "ames-1414",
+      "values": {
+        "lot_frontage": 50.0,
+        "living_area": 1367.0,
+        "lot_area": 8405.0,
+        "overall_quality": 5.0,
+        "year_built": 1900.0,
+        "full_baths": 1.0,
+        "bedrooms": 4.0,
+        "garage_area": 384.0
+      },
+      "actual": 119000.0,
+      "predicted": 96734.7674990533,
+      "lower": 49810.86460455702,
+      "upper": 143658.67039354958
+    },
+    {
+      "id": "ames-2316",
+      "values": {
+        "lot_frontage": 70.0,
+        "living_area": 1511.0,
+        "lot_area": 11207.0,
+        "overall_quality": 6.0,
+        "year_built": 1997.0,
+        "full_baths": 2.0,
+        "bedrooms": 3.0,
+        "garage_area": 413.0
+      },
+      "actual": 185000.0,
+      "predicted": 187164.65306670335,
+      "lower": 140240.75017220707,
+      "upper": 234088.55596119963
+    },
+    {
+      "id": "ames-680",
+      "values": {
+        "lot_frontage": 60.0,
+        "living_area": 1904.0,
+        "lot_area": 7200.0,
+        "overall_quality": 5.0,
+        "year_built": 1950.0,
+        "full_baths": 1.0,
+        "bedrooms": 3.0,
+        "garage_area": 240.0
+      },
+      "actual": 138000.0,
+      "predicted": 161728.45413996786,
+      "lower": 114804.55124547158,
+      "upper": 208652.35703446413
+    },
+    {
+      "id": "ames-495",
+      "values": {
+        "lot_frontage": 82.0,
+        "living_area": 2365.0,
+        "lot_area": 9430.0,
+        "overall_quality": 8.0,
+        "year_built": 1999.0,
+        "full_baths": 2.0,
+        "bedrooms": 3.0,
+        "garage_area": 856.0
+      },
+      "actual": 337000.0,
+      "predicted": 308507.54137322964,
+      "lower": 261583.63847873337,
+      "upper": 355431.4442677259
+    }
+  ],
+  "coefficients": [
+    {
+      "key": "lot_frontage",
+      "label": "Lot frontage",
+      "coefficient": 4441.116006323768,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "living_area",
+      "label": "Above-ground living area",
+      "coefficient": 33744.591279156564,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "lot_area",
+      "label": "Lot area",
+      "coefficient": 7904.54851736819,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "overall_quality",
+      "label": "Overall quality",
+      "coefficient": 29941.813373631623,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "year_built",
+      "label": "Year built",
+      "coefficient": 14378.459733833848,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "full_baths",
+      "label": "Full bathrooms",
+      "coefficient": -2761.62529178293,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "bedrooms",
+      "label": "Above-ground bedrooms",
+      "coefficient": -8383.43371437154,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "garage_area",
+      "label": "Garage area",
+      "coefficient": 9051.211729935745,
+      "is_missing_indicator": false
+    },
+    {
+      "key": "lot_frontage_missing",
+      "label": "Lot frontage missing",
+      "coefficient": -1336.5934276338394,
+      "is_missing_indicator": true
+    },
+    {
+      "key": "garage_area_missing",
+      "label": "Garage area missing",
+      "coefficient": 57.235776123626444,
+      "is_missing_indicator": true
+    }
+  ],
+  "coefficient_units": "Historical USD per one training-set standard deviation of the transformed feature, with other features held fixed. Missing indicators are scaled too. Associations, not causal effects.",
+  "methodology": [
+    "A fixed seed partitions labeled rows 60% training, 20% interval calibration, 20% final testing. Repeated property IDs are grouped if present.",
+    "Numeric blanks and NA are unknown. Observed zero garage area means no garage and stays zero; unknown garage area stays missing until imputation.",
+    "Only training rows determine feature medians, missingness indicators, scaling, and model weights. Calibration rows set interval width; test rows report performance.",
+    "Eight features and Ridge alpha=10 are predeclared. No test-driven feature selection, outlier removal, or hyperparameter tuning is performed.",
+    "The baseline always predicts the training-set median sale price. Both main models are evaluated on every test row.",
+    "A 95% bootstrap confidence interval describes uncertainty in average test error for a fixed trained model. A 90% conformal prediction interval describes a new outcome; these are different quantities."
+  ],
+  "limitations": [
+    "This is a historical Ames, Iowa learning exercise. It has not been validated for current Georgia prices or lead prioritization.",
+    "Bootstrap MAE intervals condition on these trained models and this split; they omit model-training and split variability.",
+    "Split-conformal coverage assumes exchangeable calibration and future examples. Its 90% target is marginal over examples, not a promise for each home or subgroup.",
+    "Random splitting mixes sale years and neighborhoods; a future-year or new-market deployment needs fresh temporal and geographic validation.",
+    "Median imputation preserves rows but does not explain why values are missing. Missingness may be informative, and newly missing fields may lack a learned indicator.",
+    "Linear predictions and symmetric intervals can be implausible on unusual inputs. Coefficients are associations, not causal effects."
+  ],
+  "sources": [
+    {
+      "title": "De Cock (2011): Ames Housing dataset and teaching paper",
+      "url": "https://jse.amstat.org/v19n3/decock.pdf"
+    },
+    {
+      "title": "Original Ames Housing data",
+      "url": "https://jse.amstat.org/v19n3/decock/AmesHousing.txt"
+    },
+    {
+      "title": "scikit-learn: avoiding data leakage",
+      "url": "https://scikit-learn.org/stable/common_pitfalls.html#data-leakage"
+    },
+    {
+      "title": "Angelopoulos and Bates: A Gentle Introduction to Conformal Prediction",
+      "url": "https://arxiv.org/abs/2107.07511"
+    }
+  ],
+  "complete_case_comparison": {
+    "train_rows": 1449,
+    "discarded_train_rows": 309,
+    "test_rows": 493,
+    "excluded_test_rows": 93,
+    "models": [
+      {
+        "key": "ridge",
+        "label": "Imputation model on complete test rows",
+        "mae": 23518.910798342546,
+        "rmse": 34937.57440434015,
+        "r2": 0.837632286167048,
+        "mae_ci": [
+          21317.11802518662,
+          25708.942176953482
+        ],
+        "test_rows": 493
+      },
+      {
+        "key": "complete_case",
+        "label": "Ridge trained only on complete rows",
+        "mae": 23583.78701586812,
+        "rmse": 34725.68004323159,
+        "r2": 0.8395958152331264,
+        "mae_ci": [
+          21408.326228267142,
+          25737.78526239625
+        ],
+        "test_rows": 493
+      }
+    ],
+    "note": "Both models use the same complete test cohort; these subset metrics must not be compared directly with full-test metrics."
+  },
+  "missingness_slices": [
+    {
+      "label": "Any feature missing",
+      "rows": 93,
+      "mae": 20190.692086231815,
+      "coverage": 0.9247311827956989,
+      "coverage_ci": [
+        0.8527029989674109,
+        0.9630633160183195
+      ]
+    },
+    {
+      "label": "All features observed",
+      "rows": 493,
+      "mae": 23518.910798342546,
+      "coverage": 0.9127789046653144,
+      "coverage_ci": [
+        0.8845726263874756,
+        0.9346021682563885
+      ]
+    }
+  ]
+}

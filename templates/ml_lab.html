@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="An interactive machine learning notebook: predicting historical Ames house prices, handling missing values, and measuring uncertainty.">
+  <title>Property ML Lab · Sprint Lead Generation</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='ml_lab.css') }}">
+  <script src="{{ url_for('static', filename='ml_lab.js') }}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="Sprint Lead Generation home">
+        <span class="brand-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M3 10 12 3l9 7v11H3V10Z"/><path d="M9 21v-8h6v8"/></svg></span>
+        <span>Sprint<span class="brand-subtitle">LEAD GENERATION</span></span>
+      </a>
+      <div class="header-label"><span class="status-dot" aria-hidden="true"></span> Research workspace</div>
+      <a href="/" class="back-link"><span aria-hidden="true">←</span> Back to leads</a>
+    </div>
+  </header>
+
+  <main id="main" class="page-shell">
+    <section class="hero" aria-labelledby="page-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="lab-number">LAB / 01</span> APPLIED MACHINE LEARNING</p>
+        <h1 id="page-title">Missing data.<br><em>Honest predictions.</em></h1>
+        <p class="hero-description">A property price experiment you can take apart. Follow the data, compare a simple model, and see what an estimate leaves uncertain.</p>
+        <a class="text-link" href="#experiment">Explore the experiment <span aria-hidden="true">↘</span></a>
+      </div>
+      <aside class="lab-note" aria-label="Experiment at a glance">
+        <p class="eyebrow">THE RESEARCH QUESTION</p>
+        <p class="research-question">Can a small set of property features beat a single, typical sale price?</p>
+        <div class="notebook-line"><span>Study</span><strong>Ames, Iowa · 2006–2010</strong></div>
+        <div class="notebook-line"><span>Task</span><strong>Supervised regression</strong></div>
+        <div class="notebook-line"><span>Method</span><strong>Ridge + median imputation</strong></div>
+        <p class="note-footer">A learning project within Sprint</p>
+      </aside>
+    </section>
+
+    <div class="scope-note"><span class="scope-mark" aria-hidden="true">i</span><p><strong>Historical research data.</strong> This experiment uses Ames sales from 2006–2010. It does not estimate current Georgia property values or predict which leads will convert.</p></div>
+
+    <nav class="chapter-nav" aria-label="Lab sections">
+      <a href="#experiment"><span>01</span> The experiment</a>
+      <a href="#missing-data"><span>02</span> Missing data</a>
+      <a href="#predict"><span>03</span> Try a prediction</a>
+      <a href="#method"><span>04</span> How it works</a>
+    </nav>
+
+    <div id="load-state" class="load-state" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <div><strong>Preparing the experiment</strong><p>Loading the dataset and evaluating the models. The first run may take a few seconds.</p></div>
+    </div>
+    <div id="load-error" class="error-panel" role="alert" hidden>
+      <h2>The experiment could not load</h2>
+      <p id="load-error-message"></p>
+      <button id="retry-button" class="button button-primary" type="button">Try again</button>
+    </div>
+
+    <div id="report-content" hidden>
+      <section id="experiment" class="chapter" aria-labelledby="experiment-title">
+        <div class="section-heading"><div><p class="eyebrow">01 / THE EXPERIMENT</p><h2 id="experiment-title">Does the model learn anything?</h2></div><a class="download-link" href="/api/ml/report/download" download>Download report <span aria-hidden="true">↓</span></a></div>
+        <p class="section-intro">Start with a fair comparison. The baseline predicts the training set’s median sale price for every house. Ridge regression learns how the property features relate to sale price.</p>
+
+        <dl class="data-strip">
+          <div><dt>Historical sales</dt><dd id="dataset-rows">—</dd></div>
+          <div><dt>Property features</dt><dd id="feature-count">—</dd></div>
+          <div><dt>Rows with missing features</dt><dd id="missing-rows">—</dd></div>
+          <div><dt>Untouched test set</dt><dd id="test-rows">—</dd></div>
+        </dl>
+
+        <div class="evaluation-grid">
+          <article class="results-card">
+            <div class="card-heading"><div><p class="eyebrow">THE MAIN RESULT</p><h3>Average prediction error</h3></div><span class="small-label">Lower is better</span></div>
+            <p class="supporting-copy">Mean absolute error (MAE), in historical US dollars. The thin range around each point is a 95% bootstrap confidence interval for the test-set mean error.</p>
+            <div id="model-comparison" class="model-comparison"></div>
+            <p id="improvement-note" class="finding"></p>
+            <div class="table-scroll"><table class="metrics-table"><caption class="sr-only">Model evaluation on the same held-out test houses</caption><thead><tr><th scope="col">Model</th><th scope="col">MAE</th><th scope="col">RMSE</th><th scope="col">R²</th></tr></thead><tbody id="model-table-body"></tbody></table></div>
+            <details class="plain-details"><summary>What do these metrics mean?</summary><p><strong>MAE</strong> is the average absolute dollar error. <strong>RMSE</strong> penalizes large mistakes more. <strong>R²</strong> compares squared error with predicting the test-set average: 1 is perfect, 0 matches that reference, and a negative value is worse.</p><p>The bootstrap resamples test-house errors to estimate sampling uncertainty. It does not capture every source of uncertainty, such as retraining the model or a different housing market.</p></details>
+          </article>
+
+          <article class="coverage-card">
+            <p class="eyebrow">A DIFFERENT KIND OF INTERVAL</p>
+            <h3>How often did the price<br>land inside the range?</h3>
+            <p class="coverage-value" id="coverage-value">—</p>
+            <p class="coverage-description" id="coverage-description"></p>
+            <div class="coverage-track" aria-hidden="true"><span id="coverage-bar"></span><span class="coverage-target"></span></div>
+            <div class="coverage-legend"><span>Observed coverage</span><span id="coverage-target-label">90% target</span></div>
+            <p id="coverage-ci" class="coverage-ci"></p>
+            <div class="coverage-explanation"><strong>Confidence interval ≠ prediction interval</strong><p>The 95% interval describes uncertainty in a model’s average error. The 90% prediction interval is a range for a future sale price, calibrated on separate houses.</p><p>90% is a long-run coverage target for similar data, not a guarantee for an individual house.</p></div>
+          </article>
+        </div>
+
+        <div class="split-heading"><h3>One dataset. Three separate jobs.</h3><span class="small-label" id="split-seed"></span></div>
+        <div id="split-track" class="split-track" aria-hidden="true"></div>
+        <div id="split-details" class="split-details"></div>
+      </section>
+
+      <section id="missing-data" class="chapter" aria-labelledby="missing-title">
+        <div class="section-heading"><div><p class="eyebrow">02 / MISSING DATA</p><h2 id="missing-title">An empty field is still information.</h2></div><span id="missing-cell-count" class="section-tag"></span></div>
+        <div class="missing-intro"><p>Real property records have gaps. Here, missing numeric features are filled with the <strong>training-set median</strong>. The model also receives missingness indicators, so it can distinguish an observed value from a filled-in one.</p><aside><span class="margin-label">THE IMPORTANT DETAIL</span><p>Medians and scaling are learned from training data only. Looking at test data while preparing the features would leak information into the evaluation.</p></aside></div>
+        <div class="table-scroll missing-table-wrap"><table class="missing-table"><caption>Missingness across the dataset; replacement values learned from the training split.</caption><thead><tr><th scope="col">Property feature</th><th scope="col">Missing values</th><th scope="col">Missing rate</th><th scope="col">Training median</th></tr></thead><tbody id="missing-table-body"></tbody></table></div>
+        <p class="footnote">A blank is not automatically zero. A missing frontage measurement is unknown; a recorded garage area of zero can be a real value. Median imputation is a simple baseline, and can miss why information is absent.</p>
+        <details id="complete-case-audit" class="complete-case-audit plain-details" hidden><summary>What if we simply dropped incomplete rows?</summary><p id="complete-case-summary"></p><div class="table-scroll"><table class="metrics-table"><caption id="complete-case-caption"></caption><thead><tr><th scope="col">Training approach</th><th scope="col">MAE</th><th scope="col">95% confidence interval</th></tr></thead><tbody id="complete-case-body"></tbody></table></div><p>Similar error here does not prove that imputation improves accuracy. Its practical benefit is preserving training rows and making predictions when a feature is missing. These subset results use a different test cohort from the main comparison above.</p></details>
+      </section>
+
+      <section id="predict" class="chapter" aria-labelledby="prediction-title">
+        <div class="section-heading"><div><p class="eyebrow">03 / TRY A PREDICTION</p><h2 id="prediction-title">Meet a house. Leave a gap.</h2></div><span class="section-tag">Interactive experiment</span></div>
+        <p class="section-intro">Load a test house, clear a feature, and estimate its historical sale price. The result shows exactly which values were imputed. Custom profiles and newly blanked features are educational illustrations; measured coverage applies to the original held-out Ames rows.</p>
+        <div class="demo-actions"><button id="load-example" type="button" class="button button-secondary">1. Load a test house</button><button id="clear-feature" type="button" class="button button-secondary">2. Clear frontage</button><span>3. Run the prediction below <span aria-hidden="true">↓</span></span></div>
+        <p id="example-status" class="example-status" role="status" aria-live="polite"></p>
+        <div class="prediction-grid">
+          <form id="prediction-form" class="prediction-form">
+            <fieldset><legend>Property features</legend><p class="form-help">Leave any field blank for “unknown.” Values below use the dataset’s original units.</p><div id="feature-fields" class="feature-fields"></div></fieldset>
+            <div class="form-submit"><button id="predict-button" type="submit" class="button button-primary">Estimate sale price <span aria-hidden="true">↗</span></button><span>Historical USD · Ames, Iowa</span></div>
+            <p id="prediction-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <aside class="prediction-result" aria-label="Prediction result" aria-live="polite" aria-atomic="true" aria-busy="false">
+            <div id="prediction-empty"><p class="eyebrow">YOUR EXPERIMENT</p><div class="empty-diagram" aria-hidden="true"><span></span><i></i><b></b></div><h3>A price is a point.<br>A range tells you more.</h3><p>Run a prediction to see the estimate, the calibrated interval, and any values the model filled in.</p></div>
+            <div id="prediction-output" hidden>
+              <p class="eyebrow">RIDGE REGRESSION ESTIMATE</p><p id="predicted-price" class="predicted-price"></p><p class="result-unit">Historical sale price · US dollars</p>
+              <div class="prediction-interval"><div class="interval-heading"><strong id="prediction-level">90% prediction interval</strong><span>Split conformal</span></div><div class="interval-visual" aria-hidden="true"><span></span><i id="prediction-marker"></i></div><div class="interval-endpoints"><span id="prediction-lower"></span><span id="prediction-upper"></span></div></div>
+              <div id="actual-comparison" class="actual-comparison" hidden></div>
+              <div class="imputation-result"><h4 id="imputation-title">Values filled in</h4><ul id="imputed-fields"></ul><p id="no-imputation" hidden>All features were provided. No values were filled in.</p></div>
+              <ul id="prediction-warnings" class="prediction-warnings" hidden></ul>
+              <p class="result-limit">Coverage was measured on the original held-out Ames rows. Custom values and newly blanked features may change that distribution. This educational interval is not an individual guarantee or a current Georgia valuation.</p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="method" class="chapter" aria-labelledby="method-title">
+        <div class="section-heading"><div><p class="eyebrow">04 / HOW IT WORKS</p><h2 id="method-title">Small model. Visible decisions.</h2></div></div>
+        <div class="method-grid">
+          <article><span class="method-number">01</span><h3>Learn a relationship</h3><p>Each house is a row. Its features are the inputs; its sale price is the target. Ridge regression combines weighted features into a numeric prediction, with a penalty that keeps coefficients from growing too large.</p></article>
+          <article><span class="method-number">02</span><h3>Keep the test honest</h3><p>A pipeline fills missing values, adds indicators, scales features, and trains the model. Only the training split fits these steps. The final test split stays separate until evaluation.</p></article>
+          <article><span class="method-number">03</span><h3>Measure uncertainty</h3><p>Calibration houses set the conformal interval width from prediction errors. Test houses then measure actual coverage. Bootstrap resampling estimates a confidence interval around the test-set average error.</p></article>
+        </div>
+        <details class="limitations plain-details" open><summary>What this experiment can’t establish</summary><p>This is an educational, linear model of historical transactions. It can miss nonlinear relationships, neighborhood effects, unusual homes, and changes over time. Randomly splitting historical sales does not simulate predicting a later housing market. Conformal coverage relies on calibration and future examples being exchangeable; market shifts can break that assumption. A feature’s learned weight is an association, not proof of causation.</p></details>
+        <div class="provenance"><div><p class="eyebrow">REPRODUCIBLE BY DESIGN</p><p id="dataset-provenance"></p><p class="hash-line">Dataset SHA-256 <code id="dataset-hash"></code></p></div><a class="text-link" href="/api/ml/report/download" download>Take the evidence with you <span aria-hidden="true">↗</span></a></div>
+      </section>
+    </div>
+
+    <section class="reading-section" aria-labelledby="reading-title"><h2 id="reading-title">Behind the experiment</h2><div class="reading-grid"><a href="https://jse.amstat.org/v19n3/decock.pdf" target="_blank" rel="noopener noreferrer"><span>DATASET</span><strong>De Cock · Ames Housing</strong><p>The original dataset and its use in regression education.</p><span class="external-arrow" aria-hidden="true">↗</span></a><a href="https://scikit-learn.org/stable/modules/impute.html" target="_blank" rel="noopener noreferrer"><span>PREPROCESSING</span><strong>scikit-learn · Imputation</strong><p>Simple imputation and indicators for missing values.</p><span class="external-arrow" aria-hidden="true">↗</span></a><a href="https://scikit-learn.org/stable/common_pitfalls.html" target="_blank" rel="noopener noreferrer"><span>EVALUATION</span><strong>scikit-learn · Data leakage</strong><p>Why preprocessing belongs inside a training pipeline.</p><span class="external-arrow" aria-hidden="true">↗</span></a><a href="https://arxiv.org/abs/2107.07511" target="_blank" rel="noopener noreferrer"><span>UNCERTAINTY</span><strong>Angelopoulos &amp; Bates · Conformal prediction</strong><p>A practical introduction to prediction sets and coverage.</p><span class="external-arrow" aria-hidden="true">↗</span></a></div></section>
+    <noscript><div class="error-panel">Enable JavaScript to load the experiment and try predictions. You can also <a href="/api/ml/report/download">download the report as JSON</a>.</div></noscript>
+  </main>
+  <footer class="site-footer"><div class="page-shell"><span>Sprint / Property ML Lab</span><p>A transparent experiment in data, prediction, and uncertainty.</p><a href="#main">Back to top ↑</a></div></footer>
+</body>
+</html>
